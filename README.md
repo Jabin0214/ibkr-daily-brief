@@ -102,7 +102,7 @@ ibkr-daily-brief/
 4. 生成并保存 Query。
 5. 在 Flex Web Service 页面拿到 Token。
 6. 将 `Token` 与 `Query ID` 分别写入 `IBKR_FLEX_TOKEN` 与 `IBKR_FLEX_QUERY_ID`。
-7. 如果你的 Query 返回多个 `FlexStatement`，可以额外配置 `IBKR_ACCOUNT_ID`，只读取某一个账户。
+7. 如果你的 Query 返回多个 `FlexStatement`，系统会自动做汇总，更适合多账户用户。
 
 ## Telegram Bot
 
@@ -149,7 +149,7 @@ ibkr-daily-brief/
   - `Open Positions`
   - `Equity Summary in Base`
   - `MTM Performance Summary in Base`
-- 如果同一个 Query 返回了多个账户或多个 statement，系统默认会做汇总；如果你只想看某一个账户，请在环境变量中加 `IBKR_ACCOUNT_ID`。
+- 如果同一个 Query 返回了多个账户或多个 statement，系统会自动做汇总。
 - 如果 Telegram 没有收到消息，先在 GitHub Actions 日志里看 `Run daily brief` 这一步是否成功。
 - 如果你未来新增更多持仓规则，优先修改分析 prompt，而不是先改消息模板。
 

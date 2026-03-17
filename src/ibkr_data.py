@@ -81,22 +81,14 @@ def _parse_portfolio_xml(xml_text: str) -> dict[str, Any]:
     """Parse IBKR XML into the project portfolio structure."""
     root = ET.fromstring(xml_text)
     statements = root.findall(".//FlexStatement")
-    requested_account_id = os.getenv("IBKR_ACCOUNT_ID", "").strip()
 
     if not statements:
         return _empty_portfolio()
 
     parsed_statements = [_parse_single_statement(statement) for statement in statements]
 
-    if requested_account_id:
-        for statement_data in parsed_statements:
-            if statement_data["account_id"] == requested_account_id:
-                statement_data["scope"] = requested_account_id
-                return statement_data
-        print(f"[IBKR] Requested account {requested_account_id} not found, falling back to aggregate scope.")
-
     if len(parsed_statements) == 1:
-        parsed_statements[0]["scope"] = parsed_statements[0]["account_id"]
+        parsed_statements[0]["scope"] = "single"
         return parsed_statements[0]
 
     return _aggregate_statements(parsed_statements)

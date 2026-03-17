@@ -221,7 +221,7 @@ def _build_portfolio_snapshot(positions: dict[str, Any]) -> str:
 
     lines = [
         "💼 账户快照",
-        f"账户范围：{scope or 'unknown'} ({account_id})",
+        f"账户范围：{_format_account_scope(scope, account_id)}",
         f"总资产：{total_value:,.2f} {base_currency}",
         f"现金：{cash:,.2f} {base_currency} ({cash_pct:.2f}%)",
         f"当日盈亏：{daily_pnl:,.2f} {base_currency}",
@@ -412,11 +412,24 @@ def _normalize_analysis(text: str) -> str:
     cleaned = _clean_for_telegram(text)
     cleaned = re.sub(r"^\|\s*.*\|\s*$", "", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = cleaned.replace("倾向倾向继续持有", "倾向继续持有")
     cleaned = cleaned.replace("减仓至", "更适合逐步减仓至")
     cleaned = cleaned.replace("继续持有", "倾向继续持有")
     cleaned = cleaned.replace("立即警告", "需要重点警惕")
     cleaned = cleaned.replace("暂不加仓", "更适合暂不加仓")
     return cleaned.strip()
+
+
+def _format_account_scope(scope: str, account_id: str) -> str:
+    """Format account scope for a user-facing portfolio snapshot."""
+    if scope == "aggregate":
+        account_count = len([item for item in account_id.split(",") if item.strip()])
+        return f"合并账户视图（{account_count} 个账户）"
+    if scope == "single":
+        return "单账户视图"
+    if scope == "mock":
+        return "测试数据"
+    return "账户视图"
 
 
 if __name__ == "__main__":
