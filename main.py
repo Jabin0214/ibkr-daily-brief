@@ -211,6 +211,8 @@ def _build_portfolio_snapshot(positions: dict[str, Any]) -> str:
     daily_pnl = float(positions.get("daily_pnl", 0.0))
     cash_pct = float(positions.get("cash_pct", 0.0))
     base_currency = positions.get("base_currency", "BASE")
+    scope = positions.get("scope", "")
+    account_id = positions.get("account_id", "")
     holdings = sorted(
         positions.get("positions", []),
         key=lambda item: float(item.get("market_value", 0.0)),
@@ -219,6 +221,7 @@ def _build_portfolio_snapshot(positions: dict[str, Any]) -> str:
 
     lines = [
         "💼 账户快照",
+        f"账户范围：{scope or 'unknown'} ({account_id})",
         f"总资产：{total_value:,.2f} {base_currency}",
         f"现金：{cash:,.2f} {base_currency} ({cash_pct:.2f}%)",
         f"当日盈亏：{daily_pnl:,.2f} {base_currency}",

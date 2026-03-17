@@ -80,14 +80,38 @@ def _poll_flex_statement(token: str, reference_code: str) -> str:
 def _parse_portfolio_xml(xml_text: str) -> dict[str, Any]:
     """Parse IBKR XML into the project portfolio structure."""
     root = ET.fromstring(xml_text)
+    statements = root.findall(".//FlexStatement")
+    requested_account_id = os.getenv("IBKR_ACCOUNT_ID", "").strip()
 
+    if not statements:
+        return _empty_portfolio()
+
+    parsed_statements = [_parse_single_statement(statement) for statement in statements]
+
+    if requested_account_id:
+        for statement_data in parsed_statements:
+            if statement_data["account_id"] == requested_account_id:
+                statement_data["scope"] = requested_account_id
+                return statement_data
+        print(f"[IBKR] Requested account {requested_account_id} not found, falling back to aggregate scope.")
+
+    if len(parsed_statements) == 1:
+        parsed_statements[0]["scope"] = parsed_statements[0]["account_id"]
+        return parsed_statements[0]
+
+    return _aggregate_statements(parsed_statements)
+
+
+def _parse_single_statement(statement: ET.Element) -> dict[str, Any]:
+    """Parse a single FlexStatement into a normalized portfolio structure."""
     positions: list[dict[str, Any]] = []
     cash = 0.0
     daily_pnl = 0.0
     total_value = 0.0
     base_currency = "BASE"
+    account_id = statement.attrib.get("accountId", "UNKNOWN")
 
-    for position in root.findall(".//OpenPosition"):
+    for position in statement.findall(".//OpenPosition"):
         symbol = position.attrib.get("symbol", "").strip() or "UNKNOWN"
         currency = position.attrib.get("currency", "").strip() or "UNKNOWN"
         quantity = _to_float(position.attrib.get("position", "0"))
@@ -111,7 +135,7 @@ def _parse_portfolio_xml(xml_text: str) -> dict[str, Any]:
             }
         )
 
-    latest_equity_summary = _latest_equity_summary(root)
+    latest_equity_summary = _latest_equity_summary(statement)
     if latest_equity_summary is not None:
         base_currency = latest_equity_summary.attrib.get("currency", "BASE") or "BASE"
         cash = _to_float(latest_equity_summary.attrib.get("cash", "0"))
@@ -120,7 +144,7 @@ def _parse_portfolio_xml(xml_text: str) -> dict[str, Any]:
             latest_equity_summary.attrib.get("total"),
         )
 
-    base_cash_report = root.find(".//CashReportCurrency[@currency='BASE_SUMMARY']")
+    base_cash_report = statement.find(".//CashReportCurrency[@currency='BASE_SUMMARY']")
     if base_cash_report is not None:
         cash = _first_nonzero(
             base_cash_report.attrib.get("endingCash"),
@@ -128,14 +152,14 @@ def _parse_portfolio_xml(xml_text: str) -> dict[str, Any]:
             base_cash_report.attrib.get("settledCash"),
         )
 
-    total_line = root.find(".//MTMPerformanceSummaryUnderlying[@description='Total P/L']")
+    total_line = statement.find(".//MTMPerformanceSummaryUnderlying[@description='Total P/L']")
     if total_line is not None:
         daily_pnl = _first_nonzero(
             total_line.attrib.get("total"),
             total_line.attrib.get("totalWithAccruals"),
         )
 
-    for mtm_summary in root.findall(".//MTMPerformanceSummaryUnderlying"):
+    for mtm_summary in statement.findall(".//MTMPerformanceSummaryUnderlying"):
         if mtm_summary.attrib.get("description") == "Total P/L":
             continue
         if daily_pnl == 0.0:
@@ -146,7 +170,7 @@ def _parse_portfolio_xml(xml_text: str) -> dict[str, Any]:
             )
 
     if cash == 0.0 or total_value == 0.0:
-        for equity_summary in root.findall(".//EquitySummaryByReportDateInBase"):
+        for equity_summary in statement.findall(".//EquitySummaryByReportDateInBase"):
             cash = max(cash, _to_float(equity_summary.attrib.get("cash", "0")))
             total_value = max(
                 total_value,
@@ -159,6 +183,37 @@ def _parse_portfolio_xml(xml_text: str) -> dict[str, Any]:
     cash_pct = (cash / total_value * 100) if total_value else 0.0
 
     return {
+        "account_id": account_id,
+        "positions": positions,
+        "base_currency": base_currency,
+        "cash": round(cash, 2),
+        "total_value": round(total_value, 2),
+        "daily_pnl": round(daily_pnl, 2),
+        "cash_pct": round(cash_pct, 2),
+    }
+
+
+def _aggregate_statements(statements: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate multiple FlexStatement payloads into one portfolio scope."""
+    base_currency = statements[0].get("base_currency", "BASE") if statements else "BASE"
+    positions: list[dict[str, Any]] = []
+    cash = 0.0
+    total_value = 0.0
+    daily_pnl = 0.0
+    account_ids: list[str] = []
+
+    for statement in statements:
+        positions.extend(statement.get("positions", []))
+        cash += float(statement.get("cash", 0.0))
+        total_value += float(statement.get("total_value", 0.0))
+        daily_pnl += float(statement.get("daily_pnl", 0.0))
+        account_ids.append(str(statement.get("account_id", "UNKNOWN")))
+
+    cash_pct = (cash / total_value * 100) if total_value else 0.0
+
+    return {
+        "account_id": ",".join(account_ids),
+        "scope": "aggregate",
         "positions": positions,
         "base_currency": base_currency,
         "cash": round(cash, 2),
@@ -172,6 +227,8 @@ def _mock_portfolio_data() -> dict[str, Any]:
     """Return fallback portfolio data for testing and failure scenarios."""
     print("[IBKR] Returning mock portfolio data.")
     return {
+        "account_id": "MOCK",
+        "scope": "mock",
         "positions": [
             {
                 "symbol": "TSLA",
@@ -194,6 +251,20 @@ def _mock_portfolio_data() -> dict[str, Any]:
         "total_value": 40220.0,
         "daily_pnl": -340.0,
         "cash_pct": 12.43,
+    }
+
+
+def _empty_portfolio() -> dict[str, Any]:
+    """Return an empty portfolio when the XML has no statements."""
+    return {
+        "account_id": "UNKNOWN",
+        "scope": "empty",
+        "positions": [],
+        "base_currency": "BASE",
+        "cash": 0.0,
+        "total_value": 0.0,
+        "daily_pnl": 0.0,
+        "cash_pct": 0.0,
     }
 
 
