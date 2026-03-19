@@ -164,6 +164,7 @@ def _build_daily_brief(market: MarketContext, positions: dict[str, Any], analysi
     today = datetime.now().strftime("%Y-%m-%d")
     sections = [
         f"📊 每日投资简报 | {today}",
+        _build_brief_header(positions),
         _build_daily_highlights(positions),
         _build_market_snapshot(market),
         _build_portfolio_snapshot(positions),
@@ -177,29 +178,24 @@ def _build_news_flash(market: MarketContext) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     sections = [
         f"📰 每日新闻快讯 | {today}",
-        "🌍 市场主线\n" + _clean_for_telegram(market.brief),
-        "📈 宏观看板\n" + _clean_for_telegram(market.macro),
-        "💬 X 情绪\n" + _clean_for_telegram(market.sentiment),
+        _build_news_summary(market),
+        _build_market_snapshot(market),
     ]
     return "\n\n".join(section.strip() for section in sections if section.strip())
 
 
 def _build_market_snapshot(market: MarketContext) -> str:
     """Build a compact market snapshot block for the daily brief."""
-    brief_lines = _extract_key_lines(market.brief, limit=4)
-    macro_lines = _extract_key_lines(market.macro, limit=4)
-    sentiment_lines = _extract_key_lines(market.sentiment, limit=3)
+    brief_lines = _extract_key_lines(market.brief, limit=3)
+    macro_lines = _extract_key_lines(market.macro, limit=3)
+    sentiment_lines = _extract_key_lines(market.sentiment, limit=2)
 
     sections = [
         "🌍 市场情报",
-        "主线新闻：",
-        "\n".join(brief_lines) if brief_lines else "暂无主线新闻",
-        "",
-        "宏观看板：",
-        "\n".join(macro_lines) if macro_lines else "暂无宏观数据",
-        "",
-        "X 情绪：",
-        "\n".join(sentiment_lines) if sentiment_lines else "暂无情绪摘要",
+        "先看这 3 组信息：",
+        _format_section_block("主线新闻", brief_lines, "暂无主线新闻"),
+        _format_section_block("宏观看板", macro_lines, "暂无宏观数据"),
+        _format_section_block("市场情绪", sentiment_lines, "暂无情绪摘要"),
     ]
     return "\n".join(sections)
 
@@ -218,34 +214,36 @@ def _build_portfolio_snapshot(positions: dict[str, Any]) -> str:
     lines = [
         "💼 账户快照",
         f"账户范围：{_format_account_scope(scope, account_id)}",
-        f"总资产：{total_value:,.2f} {base_currency}",
-        f"现金：{cash:,.2f} {base_currency} ({cash_pct:.2f}%)",
-        f"当日盈亏：{daily_pnl:,.2f} {base_currency}",
+        (
+            f"总资产 {total_value:,.2f} {base_currency} | "
+            f"现金 {cash:,.2f} ({cash_pct:.1f}%) | "
+            f"当日盈亏 {_format_signed_number(daily_pnl)} {base_currency}"
+        ),
         "",
         "📌 当前持仓",
+        "先看仓位最大的几笔：",
     ]
 
     if not holdings:
         lines.append("暂无持仓数据")
         return "\n".join(lines)
 
-    for position in holdings:
+    for position in holdings[:5]:
         market_value = float(position.get("market_value", 0.0))
         market_currency = position.get("currency", "")
         risk_marker = _position_risk_marker(position)
         weight_pct = float(position.get("weight_pct", 0.0))
+        pnl_pct = float(position.get("pnl_pct", 0.0))
         lines.append(
-            (
-                f"{risk_marker} {position.get('symbol', 'UNKNOWN')}: "
-                f"{float(position.get('quantity', 0)):,.0f} 股/份，"
-                f"成本 {float(position.get('avg_cost', 0.0)):.2f}，"
-                f"现价 {float(position.get('current_price', 0.0)):.2f}，"
-                f"盈亏 {float(position.get('pnl_pct', 0.0)):.2f}%，"
-                f"仓位 {weight_pct:.1f}%，"
-                f"市值 {market_value:,.2f} {market_currency}".strip()
-            ).strip()
+            f"{risk_marker} {position.get('symbol', 'UNKNOWN')} | {_describe_position(position)}"
         )
 
+        lines.append(
+            f"   仓位 {weight_pct:.1f}% · 盈亏 {_format_signed_percent(pnl_pct)} · 市值 {market_value:,.0f} {market_currency}"
+        )
+
+    if len(holdings) > 5:
+        lines.append(f"其余 {len(holdings) - 5} 笔持仓已省略，避免消息过长。")
     return "\n".join(lines)
 
 
@@ -257,14 +255,14 @@ def _build_daily_highlights(positions: dict[str, Any]) -> str:
     holdings = positions.get("positions", [])
 
     lines = ["⚡ 今日要点"]
-    lines.append(f"- 账户总资产 {total_value:,.0f}，当日盈亏 {daily_pnl:,.0f}。")
-    lines.append(f"- 现金占比 {cash_pct:.1f}%，{'偏高，说明当前更保守' if cash_pct >= 30 else '处于可用区间'}。")
+    lines.append(f"- 账户今天 {_describe_daily_pnl(daily_pnl)}，总资产约 {total_value:,.0f}。")
+    lines.append(f"- 现金占比 {cash_pct:.1f}%，{_describe_cash_level(cash_pct)}。")
 
     risk_lines = _build_portfolio_alert_lines(holdings)
     if risk_lines:
         lines.extend(risk_lines)
     else:
-        lines.append("- 当前没有明显触发止损线或超集中仓位。")
+        lines.append("- 目前没有看到特别刺眼的止损或仓位过重信号。")
 
     return "\n".join(lines)
 
@@ -290,11 +288,11 @@ def _build_portfolio_alert_lines(holdings: list[dict[str, Any]]) -> list[str]:
         weight_pct = float(position.get("weight_pct", 0.0))
 
         if pnl_pct <= -20:
-            alerts.append(f"- 🚨 {symbol} 浮亏 {pnl_pct:.2f}%，已经超过强止损线。")
+            alerts.append(f"- 🚨 {symbol} 已亏损 {_format_signed_percent(pnl_pct)}，这已经是很重的回撤。")
         elif pnl_pct <= -15:
-            alerts.append(f"- ⚠️ {symbol} 浮亏 {pnl_pct:.2f}%，接近或触发止损纪律。")
+            alerts.append(f"- ⚠️ {symbol} 已亏损 {_format_signed_percent(pnl_pct)}，已经接近你的止损纪律。")
         if weight_pct >= 30:
-            alerts.append(f"- ⚠️ {symbol} 仓位占比 {weight_pct:.1f}%，已经接近或超过单仓上限。")
+            alerts.append(f"- ⚠️ {symbol} 仓位 {weight_pct:.1f}%，已经接近或超过单仓上限。")
 
     return alerts[:4]
 
@@ -424,7 +422,92 @@ def _normalize_analysis(text: str) -> str:
     cleaned = cleaned.replace("继续持有", "倾向继续持有")
     cleaned = cleaned.replace("立即警告", "需要重点警惕")
     cleaned = cleaned.replace("暂不加仓", "更适合暂不加仓")
+    cleaned = re.sub(r"^\s*市场判断\s*$", "市场判断", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*组合解读\s*$", "\n组合解读", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*风险提醒\s*$", "\n风险提醒", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*今日动作\s*$", "\n今日动作", cleaned, flags=re.MULTILINE)
     return cleaned.strip()
+
+
+def _build_brief_header(positions: dict[str, Any]) -> str:
+    """Build a one-screen summary that reads well on Telegram."""
+    holdings = positions.get("positions", [])
+    top_holding = holdings[0].get("symbol", "暂无") if holdings else "暂无"
+    daily_pnl = float(positions.get("daily_pnl", 0.0))
+    cash_pct = float(positions.get("cash_pct", 0.0))
+    lines = [
+        "一句话先看：",
+        f"- 你的账户今天 {_describe_daily_pnl(daily_pnl)}。",
+        f"- 当前仓位感觉：{_describe_cash_level(cash_pct)}，第一大持仓是 {top_holding}。",
+    ]
+    return "\n".join(lines)
+
+
+def _build_news_summary(market: MarketContext) -> str:
+    """Build a simpler summary section for news-only output."""
+    news_lines = _extract_key_lines(market.brief, limit=2)
+    macro_lines = _extract_key_lines(market.macro, limit=2)
+    sentiment_lines = _extract_key_lines(market.sentiment, limit=1)
+    combined = news_lines + macro_lines + sentiment_lines
+    if not combined:
+        combined = ["- 今天的新闻摘要暂时不完整。"]
+    return "先看重点：\n" + "\n".join(combined)
+
+
+def _format_section_block(title: str, lines: list[str], fallback: str) -> str:
+    """Format a compact titled block."""
+    body = "\n".join(lines) if lines else fallback
+    return f"{title}\n{body}"
+
+
+def _describe_daily_pnl(daily_pnl: float) -> str:
+    """Translate daily PnL into plain-language status."""
+    if daily_pnl >= 1000:
+        return f"明显赚钱（+{daily_pnl:,.0f}）"
+    if daily_pnl > 0:
+        return f"小幅赚钱（+{daily_pnl:,.0f}）"
+    if daily_pnl <= -1000:
+        return f"回撤较明显（{daily_pnl:,.0f}）"
+    if daily_pnl < 0:
+        return f"小幅回撤（{daily_pnl:,.0f}）"
+    return "基本走平"
+
+
+def _describe_cash_level(cash_pct: float) -> str:
+    """Describe cash allocation in plain Chinese."""
+    if cash_pct >= 40:
+        return "现金很多，整体偏防守"
+    if cash_pct >= 25:
+        return "现金不低，手上还有腾挪空间"
+    if cash_pct >= 10:
+        return "现金处于正常区间"
+    return "现金偏少，仓位比较满"
+
+
+def _describe_position(position: dict[str, Any]) -> str:
+    """Describe a single holding in plain language."""
+    pnl_pct = float(position.get("pnl_pct", 0.0))
+    if pnl_pct <= -20:
+        mood = "回撤很重"
+    elif pnl_pct <= -8:
+        mood = "偏弱"
+    elif pnl_pct >= 15:
+        mood = "表现很强"
+    elif pnl_pct > 0:
+        mood = "小幅盈利"
+    else:
+        mood = "接近平盘"
+    return f"{mood}，成本 {float(position.get('avg_cost', 0.0)):.2f}，现价 {float(position.get('current_price', 0.0)):.2f}"
+
+
+def _format_signed_percent(value: float) -> str:
+    """Format percentage with explicit sign."""
+    return f"{value:+.1f}%"
+
+
+def _format_signed_number(value: float) -> str:
+    """Format numeric values with explicit sign."""
+    return f"{value:+,.2f}"
 
 
 def _normalize_portfolio(positions: dict[str, Any]) -> dict[str, Any]:
