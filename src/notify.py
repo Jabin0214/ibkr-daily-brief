@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 
 from src.networking import DEFAULT_TIMEOUT, get_requests_session
 
@@ -53,6 +54,46 @@ def send_telegram(message: str) -> bool:
             return False
 
     return True
+
+
+def send_telegram_document(file_path: Path, caption: str = "") -> bool:
+    """Send a document attachment to Telegram with retries."""
+    print(f"[Telegram] Preparing document delivery: {file_path.name}")
+
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not bot_token or not chat_id:
+        print("[Telegram] Missing bot token or chat id.")
+        return False
+
+    endpoint = f"https://api.telegram.org/bot{bot_token}/sendDocument"
+    session = get_requests_session()
+
+    for attempt in range(3):
+        try:
+            with file_path.open("rb") as report_file:
+                response = session.post(
+                    endpoint,
+                    data={
+                        "chat_id": chat_id,
+                        "caption": caption[:1024],
+                        "disable_content_type_detection": False,
+                    },
+                    files={"document": (file_path.name, report_file, "text/html")},
+                    timeout=DEFAULT_TIMEOUT,
+                )
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("ok"):
+                print(f"[Telegram] Document sent: {file_path.name}")
+                return True
+            raise ValueError(f"Telegram API returned ok=false: {payload}")
+        except Exception as exc:
+            print(f"[Telegram] Document send failed on attempt {attempt + 1}/3: {exc}")
+            time.sleep(2)
+
+    print(f"[Telegram] Failed to send document: {file_path.name}")
+    return False
 
 
 def _split_message(message: str, limit: int) -> list[str]:

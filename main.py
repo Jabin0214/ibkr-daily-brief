@@ -17,8 +17,9 @@ from dotenv import load_dotenv
 from src.claude_analysis import generate_analysis
 from src.grok_news import get_market_news
 from src.ibkr_data import get_ibkr_positions
-from src.notify import send_telegram
+from src.notify import send_telegram, send_telegram_document
 from src.perplexity_macro import get_macro_data, get_market_brief
+from src.reporting import write_daily_report
 
 NEWS_MARKET_FALLBACK = (
     "市场主线暂时不完整，但当前可确认的重点仍是："
@@ -76,8 +77,9 @@ def main() -> int:
         positions = _fetch_portfolio(args.test)
         analysis = _generate_investment_analysis(market, positions)
         final_message = _build_daily_brief(market, positions, analysis)
+        report_path = _write_detailed_report(analysis, market, positions)
 
-        _emit_output(final_message, args.send, "daily brief")
+        _emit_output(final_message, args.send, "daily brief", report_path=report_path)
         _print_runtime(start_time, _estimate_cost())
         return 0
     except Exception as exc:
@@ -135,13 +137,28 @@ def _generate_investment_analysis(market: MarketContext, positions: dict[str, An
     return generate_analysis(news_context, positions)
 
 
-def _emit_output(message: str, send: bool, label: str) -> None:
+def _emit_output(message: str, send: bool, label: str, report_path: Path | None = None) -> None:
     """Print the message and optionally send it to Telegram."""
-    print(message)
+    if report_path is not None:
+        print(f"[Main] Detailed report saved to: {report_path}")
+    else:
+        print(message)
     if not send:
+        if report_path is None:
+            return
+        print(message)
         return
 
     print(f"[Main] Step 4/4: Sending {label} to Telegram...")
+    if report_path is not None:
+        document_sent = send_telegram_document(
+            report_path,
+            caption="今晚的详尽版报告已附上，建议直接用手机打开 HTML 查看。",
+        )
+        if not document_sent:
+            raise RuntimeError("Telegram document delivery failed")
+        return
+
     sent = send_telegram(message)
     if not sent:
         raise RuntimeError("Telegram delivery failed")
@@ -341,6 +358,25 @@ def _handle_failure(exc: Exception, start_time: float) -> int:
     print(f"[Main] Workflow failed: {exc}")
     send_telegram(error_message)
     return 1
+
+
+def _write_detailed_report(
+    analysis: str,
+    market: MarketContext,
+    positions: dict[str, Any],
+) -> Path:
+    """Generate a detailed HTML report for archive and Telegram delivery."""
+    print("[Main] Step 4/4: Building detailed HTML report...")
+    return write_daily_report(
+        analysis=_normalize_analysis(analysis),
+        market={
+            "brief": _clean_for_telegram(market.brief),
+            "macro": _clean_for_telegram(market.macro),
+            "sentiment": _clean_for_telegram(market.sentiment),
+        },
+        positions=positions,
+        output_dir=Path(__file__).with_name("reports"),
+    )
 
 
 def _print_runtime(start_time: float, estimated_cost: float) -> None:

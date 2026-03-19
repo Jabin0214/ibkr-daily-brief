@@ -14,6 +14,7 @@
    - 市场情报
    - 账户快照
    - AI 判断
+6. 同时生成一份 `HTML` 详尽报告，便于在手机或电脑上查看完整内容。
 
 ## 简报结构
 
@@ -34,6 +35,8 @@
    - 风险提醒
    - 今日动作
 
+另外，正式发送时 Telegram 还会附带一份 `HTML` 详尽报告文件，里面会把新闻、持仓、摘要和 AI 分析做成更易读的版式。
+
 ## 项目结构
 
 ```text
@@ -50,6 +53,7 @@ ibkr-daily-brief/
 ├── main.py
 ├── requirements.txt
 ├── .env.example
+├── reports/
 └── README.md
 ```
 
@@ -61,6 +65,7 @@ ibkr-daily-brief/
 4. 本地测试：`python main.py --test`
 5. 只看新闻快讯：`python main.py --news-only`
 6. 正式生成并发送：`python main.py --send`
+7. 每次完整生成后，会在本地 `reports/` 目录保存一份同日的 `HTML` 报告。
 
 ## 推荐运行方式
 
@@ -159,6 +164,7 @@ ibkr-daily-brief/
 - `--test` 模式会跳过真实 IBKR，改用模拟持仓，方便联调整体流程。
 - `--news-only` 模式只生成市场快讯，不做持仓分析。
 - `--send` 会将最终结果发送到 Telegram。
+- 完整模式会在发送 Telegram 摘要后，再附带一份 `HTML` 详尽报告文件。
 - 新闻与宏观数据会并行拉取，以减少总耗时。
 - 如果主流程出现异常，系统会尝试通过 Telegram 发送失败告警。
 
