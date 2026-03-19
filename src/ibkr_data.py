@@ -9,6 +9,8 @@ from typing import Any
 
 import requests
 
+from src.networking import DEFAULT_TIMEOUT, get_requests_session
+
 FLEX_REQUEST_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/SendRequest"
 FLEX_STATEMENT_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/GetStatement"
 IBKR_HEADERS = {"User-Agent": "ibkr-daily-brief/1.0"}
@@ -26,8 +28,9 @@ def get_ibkr_positions() -> dict[str, Any]:
         return _mock_portfolio_data()
 
     try:
-        reference_code = _request_flex_statement(token, query_id)
-        xml_text = _poll_flex_statement(token, reference_code)
+        session = get_requests_session()
+        reference_code = _request_flex_statement(session, token, query_id)
+        xml_text = _poll_flex_statement(session, token, reference_code)
         portfolio = _parse_portfolio_xml(xml_text)
         print("[IBKR] Flex Query parsing completed.")
         return portfolio
@@ -36,13 +39,13 @@ def get_ibkr_positions() -> dict[str, Any]:
         return _mock_portfolio_data()
 
 
-def _request_flex_statement(token: str, query_id: str) -> str:
+def _request_flex_statement(session: requests.Session, token: str, query_id: str) -> str:
     """Request a Flex statement generation job and return the reference code."""
-    response = requests.get(
+    response = session.get(
         FLEX_REQUEST_URL,
         params={"t": token, "q": query_id, "v": "3"},
         headers=IBKR_HEADERS,
-        timeout=30,
+        timeout=DEFAULT_TIMEOUT,
     )
     response.raise_for_status()
 
@@ -58,15 +61,15 @@ def _request_flex_statement(token: str, query_id: str) -> str:
     return reference_code
 
 
-def _poll_flex_statement(token: str, reference_code: str) -> str:
+def _poll_flex_statement(session: requests.Session, token: str, reference_code: str) -> str:
     """Poll Flex statement endpoint until the statement is ready."""
     for attempt in range(5):
         print(f"[IBKR] Polling statement... attempt {attempt + 1}/5")
-        response = requests.get(
+        response = session.get(
             FLEX_STATEMENT_URL,
             params={"t": token, "q": reference_code, "v": "3"},
             headers=IBKR_HEADERS,
-            timeout=30,
+            timeout=DEFAULT_TIMEOUT,
         )
         response.raise_for_status()
 
@@ -150,11 +153,10 @@ def _parse_single_statement(statement: ET.Element) -> dict[str, Any]:
             total_line.attrib.get("total"),
             total_line.attrib.get("totalWithAccruals"),
         )
-
-    for mtm_summary in statement.findall(".//MTMPerformanceSummaryUnderlying"):
-        if mtm_summary.attrib.get("description") == "Total P/L":
-            continue
-        if daily_pnl == 0.0:
+    else:
+        for mtm_summary in statement.findall(".//MTMPerformanceSummaryUnderlying"):
+            if mtm_summary.attrib.get("description") == "Total P/L":
+                continue
             daily_pnl += _first_nonzero(
                 mtm_summary.attrib.get("mtmPnl"),
                 mtm_summary.attrib.get("markToMarketPL"),

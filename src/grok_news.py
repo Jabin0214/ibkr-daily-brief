@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-from openai import OpenAI
+from src.networking import get_openai_compatible_client
 
 
 def get_market_news() -> str:
@@ -32,11 +32,7 @@ def get_market_news() -> str:
 - 语气简洁，像交易员晨会摘要"""
 
     try:
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://api.x.ai/v1",
-            timeout=30,
-        )
+        client = get_openai_compatible_client(api_key, "https://api.x.ai/v1")
         response = client.chat.completions.create(
             model="grok-3",
             messages=[

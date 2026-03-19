@@ -6,6 +6,8 @@ import os
 
 from openai import OpenAI
 
+from src.networking import get_openai_compatible_client
+
 MACRO_FALLBACK = "宏观数据暂时不可用：请关注美股期货、VIX、美债收益率、DXY、黄金和原油的最新变化。"
 NEWS_FALLBACK = "主新闻快讯暂时不可用：请稍后重试 Perplexity 搜索。"
 
@@ -113,8 +115,4 @@ def get_market_brief() -> str:
 
 def _build_client(api_key: str) -> OpenAI:
     """Build a Perplexity OpenAI-compatible client."""
-    return OpenAI(
-        api_key=api_key,
-        base_url="https://api.perplexity.ai",
-        timeout=30,
-    )
+    return get_openai_compatible_client(api_key, "https://api.perplexity.ai")

@@ -124,15 +124,15 @@ def _fetch_portfolio(test_mode: bool) -> dict[str, Any]:
     print("[Main] Step 2/4: Fetching portfolio snapshot...")
     if test_mode:
         print("[Main] Using mock positions for test mode.")
-        return _get_test_positions()
-    return get_ibkr_positions()
+        return _normalize_portfolio(_get_test_positions())
+    return _normalize_portfolio(get_ibkr_positions())
 
 
 def _generate_investment_analysis(market: MarketContext, positions: dict[str, Any]) -> str:
     """Generate the final investment analysis from market and portfolio inputs."""
     print("[Main] Step 3/4: Generating investment analysis...")
     news_context = _build_analysis_news_context(market)
-    return generate_analysis(news_context, market.macro, positions)
+    return generate_analysis(news_context, positions)
 
 
 def _emit_output(message: str, send: bool, label: str) -> None:
@@ -213,11 +213,7 @@ def _build_portfolio_snapshot(positions: dict[str, Any]) -> str:
     base_currency = positions.get("base_currency", "BASE")
     scope = positions.get("scope", "")
     account_id = positions.get("account_id", "")
-    holdings = sorted(
-        positions.get("positions", []),
-        key=lambda item: float(item.get("market_value", 0.0)),
-        reverse=True,
-    )
+    holdings = positions.get("positions", [])
 
     lines = [
         "💼 账户快照",
@@ -237,6 +233,7 @@ def _build_portfolio_snapshot(positions: dict[str, Any]) -> str:
         market_value = float(position.get("market_value", 0.0))
         market_currency = position.get("currency", "")
         risk_marker = _position_risk_marker(position)
+        weight_pct = float(position.get("weight_pct", 0.0))
         lines.append(
             (
                 f"{risk_marker} {position.get('symbol', 'UNKNOWN')}: "
@@ -244,6 +241,7 @@ def _build_portfolio_snapshot(positions: dict[str, Any]) -> str:
                 f"成本 {float(position.get('avg_cost', 0.0)):.2f}，"
                 f"现价 {float(position.get('current_price', 0.0)):.2f}，"
                 f"盈亏 {float(position.get('pnl_pct', 0.0)):.2f}%，"
+                f"仓位 {weight_pct:.1f}%，"
                 f"市值 {market_value:,.2f} {market_currency}".strip()
             ).strip()
         )
@@ -274,25 +272,29 @@ def _build_daily_highlights(positions: dict[str, Any]) -> str:
 def _position_risk_marker(position: dict[str, Any]) -> str:
     """Return a small marker for positions with obvious risk flags."""
     pnl_pct = float(position.get("pnl_pct", 0.0))
+    weight_pct = float(position.get("weight_pct", 0.0))
     if pnl_pct <= -20:
         return "🚨"
-    if pnl_pct <= -15:
+    if pnl_pct <= -15 or weight_pct >= 30:
         return "⚠️"
     return "•"
 
 
 def _build_portfolio_alert_lines(holdings: list[dict[str, Any]]) -> list[str]:
-    """Build concise portfolio alerts for obvious stop-loss risks."""
+    """Build concise portfolio alerts for stop-loss and concentration risks."""
     alerts: list[str] = []
 
-    for position in sorted(holdings, key=lambda item: float(item.get("market_value", 0.0)), reverse=True):
+    for position in holdings:
         symbol = position.get("symbol", "UNKNOWN")
         pnl_pct = float(position.get("pnl_pct", 0.0))
+        weight_pct = float(position.get("weight_pct", 0.0))
 
         if pnl_pct <= -20:
             alerts.append(f"- 🚨 {symbol} 浮亏 {pnl_pct:.2f}%，已经超过强止损线。")
         elif pnl_pct <= -15:
             alerts.append(f"- ⚠️ {symbol} 浮亏 {pnl_pct:.2f}%，接近或触发止损纪律。")
+        if weight_pct >= 30:
+            alerts.append(f"- ⚠️ {symbol} 仓位占比 {weight_pct:.1f}%，已经接近或超过单仓上限。")
 
     return alerts[:4]
 
@@ -300,9 +302,13 @@ def _build_portfolio_alert_lines(holdings: list[dict[str, Any]]) -> list[str]:
 def _get_test_positions() -> dict[str, Any]:
     """Return test-mode portfolio data."""
     return {
+        "account_id": "TEST",
+        "scope": "mock",
+        "base_currency": "USD",
         "positions": [
             {
                 "symbol": "TSLA",
+                "currency": "USD",
                 "quantity": 100,
                 "avg_cost": 220.0,
                 "current_price": 185.0,
@@ -311,6 +317,7 @@ def _get_test_positions() -> dict[str, Any]:
             },
             {
                 "symbol": "AAPL",
+                "currency": "USD",
                 "quantity": 50,
                 "avg_cost": 190.0,
                 "current_price": 198.0,
@@ -418,6 +425,48 @@ def _normalize_analysis(text: str) -> str:
     cleaned = cleaned.replace("立即警告", "需要重点警惕")
     cleaned = cleaned.replace("暂不加仓", "更适合暂不加仓")
     return cleaned.strip()
+
+
+def _normalize_portfolio(positions: dict[str, Any]) -> dict[str, Any]:
+    """Normalize numeric portfolio fields once so downstream formatting stays simple."""
+    total_value = _safe_float(positions.get("total_value", 0.0))
+    normalized_positions: list[dict[str, Any]] = []
+
+    for raw_position in positions.get("positions", []):
+        market_value = _safe_float(raw_position.get("market_value", 0.0))
+        normalized_position = {
+            "symbol": str(raw_position.get("symbol", "UNKNOWN")),
+            "currency": str(raw_position.get("currency", "UNKNOWN")),
+            "quantity": _safe_float(raw_position.get("quantity", 0.0)),
+            "avg_cost": _safe_float(raw_position.get("avg_cost", 0.0)),
+            "current_price": _safe_float(raw_position.get("current_price", 0.0)),
+            "pnl_pct": _safe_float(raw_position.get("pnl_pct", 0.0)),
+            "market_value": market_value,
+            "weight_pct": (market_value / total_value * 100) if total_value else 0.0,
+        }
+        normalized_positions.append(normalized_position)
+
+    normalized_positions.sort(key=lambda item: item["market_value"], reverse=True)
+
+    return {
+        **positions,
+        "account_id": str(positions.get("account_id", "")),
+        "scope": str(positions.get("scope", "")),
+        "base_currency": str(positions.get("base_currency", "BASE")),
+        "cash": _safe_float(positions.get("cash", 0.0)),
+        "total_value": total_value,
+        "daily_pnl": _safe_float(positions.get("daily_pnl", 0.0)),
+        "cash_pct": _safe_float(positions.get("cash_pct", 0.0)),
+        "positions": normalized_positions,
+    }
+
+
+def _safe_float(value: Any) -> float:
+    """Convert mixed numeric inputs into float safely."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _format_account_scope(scope: str, account_id: str) -> str:

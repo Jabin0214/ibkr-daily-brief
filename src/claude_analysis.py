@@ -7,7 +7,8 @@ import os
 from typing import Any
 
 from anthropic import Anthropic
-from openai import OpenAI
+
+from src.networking import get_openai_compatible_client
 
 
 SYSTEM_PROMPT = """你是一个专业的个人投资顾问，风格直接、简洁，像给朋友发消息。
@@ -26,16 +27,13 @@ SYSTEM_PROMPT = """你是一个专业的个人投资顾问，风格直接、简�
 - 如果某个仓位触发止损线或仓位过高，要明确点名"""
 
 
-def generate_analysis(news: str, macro: str, positions: dict[str, Any]) -> str:
+def generate_analysis(market_context: str, positions: dict[str, Any]) -> str:
     """Generate a concise daily portfolio brief with Claude."""
     print("[Analysis] Starting portfolio analysis...")
 
     api_key = os.getenv("ANTHROPIC_API_KEY")
-    user_prompt = f"""【今日市场新闻】
-{news}
-
-【宏观数据】
-{macro}
+    user_prompt = f"""【市场情报】
+{market_context}
 
 【我的持仓】
 {_format_positions(positions)}
@@ -91,11 +89,7 @@ def _generate_with_claude(api_key: str, user_prompt: str) -> str:
 def _generate_with_perplexity(api_key: str, user_prompt: str) -> str:
     """Generate the final brief with Perplexity when Anthropic is unavailable."""
     try:
-        client = OpenAI(
-            api_key=api_key,
-            base_url="https://api.perplexity.ai",
-            timeout=30,
-        )
+        client = get_openai_compatible_client(api_key, "https://api.perplexity.ai")
         response = client.chat.completions.create(
             model="sonar-pro",
             messages=[
@@ -118,6 +112,43 @@ def _generate_with_perplexity(api_key: str, user_prompt: str) -> str:
 def _format_positions(positions: dict[str, Any]) -> str:
     """Format portfolio data for prompt readability."""
     try:
-        return json.dumps(positions, ensure_ascii=False, indent=2)
+        total_value = float(positions.get("total_value", 0.0))
+        cash = float(positions.get("cash", 0.0))
+        cash_pct = float(positions.get("cash_pct", 0.0))
+        daily_pnl = float(positions.get("daily_pnl", 0.0))
+        base_currency = positions.get("base_currency", "BASE")
+        scope = positions.get("scope", "unknown")
+        account_id = positions.get("account_id", "UNKNOWN")
+
+        lines = [
+            f"账户范围: {scope}",
+            f"账户ID: {account_id}",
+            f"总资产: {total_value:.2f} {base_currency}",
+            f"现金: {cash:.2f} {base_currency} ({cash_pct:.2f}%)",
+            f"当日盈亏: {daily_pnl:.2f} {base_currency}",
+            "持仓:",
+        ]
+
+        holdings = positions.get("positions", [])
+        if not holdings:
+            lines.append("- 暂无持仓")
+            return "\n".join(lines)
+
+        for position in holdings:
+            symbol = position.get("symbol", "UNKNOWN")
+            quantity = float(position.get("quantity", 0.0))
+            avg_cost = float(position.get("avg_cost", 0.0))
+            current_price = float(position.get("current_price", 0.0))
+            pnl_pct = float(position.get("pnl_pct", 0.0))
+            market_value = float(position.get("market_value", 0.0))
+            currency = position.get("currency", "UNKNOWN")
+            weight_pct = float(position.get("weight_pct", 0.0))
+            lines.append(
+                f"- {symbol}: 仓位 {weight_pct:.1f}%, 数量 {quantity:.0f}, "
+                f"成本 {avg_cost:.2f}, 现价 {current_price:.2f}, "
+                f"盈亏 {pnl_pct:.2f}%, 市值 {market_value:.2f} {currency}"
+            )
+
+        return "\n".join(lines)
     except Exception:
-        return str(positions)
+        return json.dumps(positions, ensure_ascii=False, indent=2)

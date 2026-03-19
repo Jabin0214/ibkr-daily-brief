@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 
-import requests
+from src.networking import DEFAULT_TIMEOUT, get_requests_session
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 
@@ -22,19 +22,20 @@ def send_telegram(message: str) -> bool:
 
     chunks = _split_message(message, TELEGRAM_MESSAGE_LIMIT)
     endpoint = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    session = get_requests_session()
 
     for index, chunk in enumerate(chunks, start=1):
         sent = False
         for attempt in range(3):
             try:
-                response = requests.post(
+                response = session.post(
                     endpoint,
                     json={
                         "chat_id": chat_id,
                         "text": chunk,
                         "disable_web_page_preview": True,
                     },
-                    timeout=30,
+                    timeout=DEFAULT_TIMEOUT,
                 )
                 response.raise_for_status()
                 payload = response.json()
@@ -42,6 +43,7 @@ def send_telegram(message: str) -> bool:
                     print(f"[Telegram] Sent chunk {index}/{len(chunks)}.")
                     sent = True
                     break
+                raise ValueError(f"Telegram API returned ok=false: {payload}")
             except Exception as exc:
                 print(f"[Telegram] Send failed on attempt {attempt + 1}/3: {exc}")
                 time.sleep(2)
