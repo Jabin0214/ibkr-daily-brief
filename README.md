@@ -127,7 +127,7 @@ ibkr-daily-brief/
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID`
 3. 工作流定义在 `.github/workflows/daily_brief.yml`。
-4. 它会在工作日 UTC `07:00` 运行。
+4. 它会在周一到周五 UTC `07:00` 运行。
 5. 以新西兰夏令时 `NZDT (UTC+13)` 计算，相当于工作日晚上 `20:00`。
 6. 注意：GitHub Actions 的 cron 不会自动处理新西兰夏令时切换。到了冬令时 `NZST (UTC+12)`，同一配置会在晚上 `19:00` 运行。
 7. 如果你要全年严格固定在新西兰晚上 20:00，需要在夏令时切换时手动调整 cron。
