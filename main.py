@@ -151,6 +151,10 @@ def _emit_output(message: str, send: bool, label: str, report_path: Path | None 
 
     print(f"[Main] Step 4/4: Sending {label} to Telegram...")
     if report_path is not None:
+        sent = send_telegram(message)
+        if not sent:
+            raise RuntimeError("Telegram delivery failed")
+
         document_sent = send_telegram_document(
             report_path,
             caption="今晚的详尽版报告已附上，建议直接用手机打开 HTML 查看。",
