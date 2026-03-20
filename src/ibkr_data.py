@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import time
 import xml.etree.ElementTree as ET
+from datetime import date, datetime, time as dt_time, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -14,6 +16,8 @@ from src.networking import DEFAULT_TIMEOUT, get_requests_session
 FLEX_REQUEST_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/SendRequest"
 FLEX_STATEMENT_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/GetStatement"
 IBKR_HEADERS = {"User-Agent": "ibkr-daily-brief/1.0"}
+IBKR_REPORTING_TZ = ZoneInfo("America/New_York")
+IBKR_SECURITIES_CUTOFF = dt_time(hour=20, minute=30)
 
 
 def get_ibkr_positions() -> dict[str, Any]:
@@ -29,14 +33,75 @@ def get_ibkr_positions() -> dict[str, Any]:
 
     try:
         session = get_requests_session()
-        reference_code = _request_flex_statement(session, token, query_id)
-        xml_text = _poll_flex_statement(session, token, reference_code)
+        max_wait_minutes = _env_int("IBKR_MAX_WAIT_MINUTES", 0)
+        poll_interval_seconds = _env_int("IBKR_POLL_INTERVAL_SECONDS", 300)
+        wait_for_fresh_report = _env_bool("IBKR_WAIT_FOR_FRESH_REPORT", max_wait_minutes > 0)
+        expected_report_date = _expected_activity_statement_date() if wait_for_fresh_report else None
+        if expected_report_date is not None:
+            print(
+                "[IBKR] Waiting for fresh Activity Statement dated "
+                f"{expected_report_date.isoformat()} or newer."
+            )
+
+        xml_text = _fetch_flex_statement(
+            session,
+            token,
+            query_id,
+            expected_report_date=expected_report_date,
+            max_wait_minutes=max_wait_minutes,
+            poll_interval_seconds=poll_interval_seconds,
+        )
         portfolio = _parse_portfolio_xml(xml_text)
         print("[IBKR] Flex Query parsing completed.")
         return portfolio
     except Exception as exc:
         print(f"[IBKR] Failed to fetch or parse data: {exc}")
         return _mock_portfolio_data()
+
+
+def _fetch_flex_statement(
+    session: requests.Session,
+    token: str,
+    query_id: str,
+    expected_report_date: date | None,
+    max_wait_minutes: int,
+    poll_interval_seconds: int,
+) -> str:
+    """Fetch a Flex statement and optionally wait for the next daily Activity Statement."""
+    deadline = time.monotonic() + max(0, max_wait_minutes) * 60
+    attempt = 1
+    last_xml_text = ""
+
+    while True:
+        print(f"[IBKR] Requesting Flex statement... cycle {attempt}")
+        reference_code = _request_flex_statement(session, token, query_id)
+        xml_text = _poll_flex_statement(session, token, reference_code)
+        last_xml_text = xml_text
+
+        report_date = _extract_statement_report_date(xml_text)
+        if report_date is not None:
+            print(f"[IBKR] Latest statement date from XML: {report_date.isoformat()}")
+        else:
+            print("[IBKR] Could not determine statement date from XML, using latest response.")
+
+        if expected_report_date is None or report_date is None or report_date >= expected_report_date:
+            return xml_text
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(
+                "[IBKR] Fresh statement did not arrive within wait window; "
+                f"using latest available statement dated {report_date.isoformat()}."
+            )
+            return last_xml_text
+
+        sleep_seconds = min(max(30, poll_interval_seconds), int(remaining))
+        print(
+            "[IBKR] Statement is still stale; "
+            f"waiting {sleep_seconds}s before retrying for date {expected_report_date.isoformat()}."
+        )
+        time.sleep(sleep_seconds)
+        attempt += 1
 
 
 def _request_flex_statement(session: requests.Session, token: str, query_id: str) -> str:
@@ -63,8 +128,8 @@ def _request_flex_statement(session: requests.Session, token: str, query_id: str
 
 def _poll_flex_statement(session: requests.Session, token: str, reference_code: str) -> str:
     """Poll Flex statement endpoint until the statement is ready."""
-    for attempt in range(5):
-        print(f"[IBKR] Polling statement... attempt {attempt + 1}/5")
+    for attempt in range(10):
+        print(f"[IBKR] Polling statement generation... attempt {attempt + 1}/10")
         response = session.get(
             FLEX_STATEMENT_URL,
             params={"t": token, "q": reference_code, "v": "3"},
@@ -75,7 +140,7 @@ def _poll_flex_statement(session: requests.Session, token: str, reference_code: 
 
         if "Statement generation in progress" not in response.text:
             return response.text
-        time.sleep(2)
+        time.sleep(3)
 
     raise TimeoutError("IBKR statement generation timed out")
 
@@ -287,3 +352,77 @@ def _latest_equity_summary(root: ET.Element) -> ET.Element | None:
     if not summaries:
         return None
     return max(summaries, key=lambda item: item.attrib.get("reportDate", ""))
+
+
+def _extract_statement_report_date(xml_text: str) -> date | None:
+    """Extract the latest report date visible in the IBKR Flex XML."""
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+
+    dates: list[date] = []
+
+    for summary in root.findall(".//EquitySummaryByReportDateInBase"):
+        parsed = _parse_ibkr_date(summary.attrib.get("reportDate"))
+        if parsed is not None:
+            dates.append(parsed)
+
+    for statement in root.findall(".//FlexStatement"):
+        for attr_name in ("toDate", "reportDate"):
+            parsed = _parse_ibkr_date(statement.attrib.get(attr_name))
+            if parsed is not None:
+                dates.append(parsed)
+
+    return max(dates) if dates else None
+
+
+def _parse_ibkr_date(raw_value: str | None) -> date | None:
+    """Parse common IBKR date formats into a date object."""
+    if not raw_value:
+        return None
+
+    value = raw_value.strip()
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _expected_activity_statement_date(now: datetime | None = None) -> date:
+    """Infer the freshest Activity Statement date we should expect from IBKR."""
+    current_time = now or datetime.now(IBKR_REPORTING_TZ)
+    current_date = current_time.date()
+
+    if current_date.weekday() < 5 and current_time.time() >= IBKR_SECURITIES_CUTOFF:
+        return current_date
+    return _previous_weekday(current_date)
+
+
+def _previous_weekday(current_date: date) -> date:
+    """Return the most recent weekday before the provided date."""
+    candidate = current_date - timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return candidate
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """Read a boolean-like environment variable."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an integer environment variable with a fallback."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
