@@ -222,23 +222,27 @@ def _build_portfolio_snapshot(positions: dict[str, Any]) -> str:
     total_value = float(positions.get("total_value", 0.0))
     cash = float(positions.get("cash", 0.0))
     daily_pnl = float(positions.get("daily_pnl", 0.0))
+    daily_return_pct = float(positions.get("daily_return_pct", 0.0))
     cash_pct = float(positions.get("cash_pct", 0.0))
     base_currency = positions.get("base_currency", "BASE")
     scope = positions.get("scope", "")
     account_id = positions.get("account_id", "")
+    report_date = positions.get("report_date", "")
     holdings = positions.get("positions", [])
 
     lines = [
         "💼 账户快照",
         f"账户范围：{_format_account_scope(scope, account_id)}",
+        f"报表日期：{report_date or '未知'}",
         (
             f"总资产 {total_value:,.2f} {base_currency} | "
             f"现金 {cash:,.2f} ({cash_pct:.1f}%) | "
-            f"当日盈亏 {_format_signed_number(daily_pnl)} {base_currency}"
+            f"当日盈亏 {_format_signed_number(daily_pnl)} {base_currency} "
+            f"({_format_signed_percent(daily_return_pct)})"
         ),
         "",
         "📌 当前持仓",
-        "先看仓位最大的几笔：",
+        "按绝对仓位排序，先看最影响账户波动的几笔：",
     ]
 
     if not holdings:
@@ -246,17 +250,17 @@ def _build_portfolio_snapshot(positions: dict[str, Any]) -> str:
         return "\n".join(lines)
 
     for position in holdings[:5]:
-        market_value = float(position.get("market_value", 0.0))
-        market_currency = position.get("currency", "")
+        market_value_base = float(position.get("market_value_base", 0.0))
         risk_marker = _position_risk_marker(position)
         weight_pct = float(position.get("weight_pct", 0.0))
+        net_weight_pct = float(position.get("net_weight_pct", 0.0))
         pnl_pct = float(position.get("pnl_pct", 0.0))
-        lines.append(
-            f"{risk_marker} {position.get('symbol', 'UNKNOWN')} | {_describe_position(position)}"
-        )
+        lines.append(f"{risk_marker} {_format_position_label(position)} | {_describe_position(position)}")
 
         lines.append(
-            f"   仓位 {weight_pct:.1f}% · 盈亏 {_format_signed_percent(pnl_pct)} · 市值 {market_value:,.0f} {market_currency}"
+            "   "
+            f"绝对仓位 {weight_pct:.1f}% · 净敞口 {_format_signed_percent(net_weight_pct)} · "
+            f"盈亏 {_format_signed_percent(pnl_pct)} · 市值 {market_value_base:,.0f} {base_currency}"
         )
 
     if len(holdings) > 5:
@@ -269,10 +273,14 @@ def _build_daily_highlights(positions: dict[str, Any]) -> str:
     total_value = float(positions.get("total_value", 0.0))
     cash_pct = float(positions.get("cash_pct", 0.0))
     daily_pnl = float(positions.get("daily_pnl", 0.0))
+    daily_return_pct = float(positions.get("daily_return_pct", 0.0))
     holdings = positions.get("positions", [])
 
     lines = ["⚡ 今日要点"]
-    lines.append(f"- 账户今天 {_describe_daily_pnl(daily_pnl)}，总资产约 {total_value:,.0f}。")
+    lines.append(
+        f"- 账户今天 {_describe_daily_pnl(daily_pnl)}，总资产约 {total_value:,.0f}，"
+        f"单日回报 {_format_signed_percent(daily_return_pct)}。"
+    )
     lines.append(f"- 现金占比 {cash_pct:.1f}%，{_describe_cash_level(cash_pct)}。")
 
     risk_lines = _build_portfolio_alert_lines(holdings)
@@ -290,7 +298,7 @@ def _position_risk_marker(position: dict[str, Any]) -> str:
     weight_pct = float(position.get("weight_pct", 0.0))
     if pnl_pct <= -20:
         return "🚨"
-    if pnl_pct <= -15 or weight_pct >= 30:
+    if pnl_pct <= -15 or (weight_pct >= 30 and not _is_cash_equivalent_position(position)):
         return "⚠️"
     return "•"
 
@@ -308,7 +316,7 @@ def _build_portfolio_alert_lines(holdings: list[dict[str, Any]]) -> list[str]:
             alerts.append(f"- 🚨 {symbol} 已亏损 {_format_signed_percent(pnl_pct)}，这已经是很重的回撤。")
         elif pnl_pct <= -15:
             alerts.append(f"- ⚠️ {symbol} 已亏损 {_format_signed_percent(pnl_pct)}，已经接近你的止损纪律。")
-        if weight_pct >= 30:
+        if weight_pct >= 30 and not _is_cash_equivalent_position(position):
             alerts.append(f"- ⚠️ {symbol} 仓位 {weight_pct:.1f}%，已经接近或超过单仓上限。")
 
     return alerts[:4]
@@ -320,24 +328,33 @@ def _get_test_positions() -> dict[str, Any]:
         "account_id": "TEST",
         "scope": "mock",
         "base_currency": "USD",
+        "report_date": datetime.now().strftime("%Y-%m-%d"),
         "positions": [
             {
                 "symbol": "TSLA",
+                "description": "TESLA INC",
                 "currency": "USD",
                 "quantity": 100,
+                "side": "Long",
+                "asset_category": "STK",
                 "avg_cost": 220.0,
                 "current_price": 185.0,
                 "pnl_pct": -15.9,
                 "market_value": 18500.0,
+                "market_value_base": 18500.0,
             },
             {
                 "symbol": "AAPL",
+                "description": "APPLE INC",
                 "currency": "USD",
                 "quantity": 50,
+                "side": "Long",
+                "asset_category": "STK",
                 "avg_cost": 190.0,
                 "current_price": 198.0,
                 "pnl_pct": 4.21,
                 "market_value": 9900.0,
+                "market_value_base": 9900.0,
             },
         ],
         "cash": 5000.0,
@@ -405,9 +422,16 @@ def _clean_for_telegram(text: str) -> str:
     """Remove markdown-like formatting that renders poorly in Telegram plain text."""
     cleaned = text.strip()
     cleaned = re.sub(r"^\s{0,3}#{1,6}\s*", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\[[0-9,\s]+\]", "", cleaned)
+    cleaned = re.sub(r"https?://\S+", "", cleaned)
     cleaned = cleaned.replace("**", "")
     cleaned = cleaned.replace("__", "")
     cleaned = cleaned.replace("```", "")
+    cleaned = cleaned.replace("根据搜索结果，", "")
+    cleaned = cleaned.replace("根据搜索结果", "")
+    cleaned = cleaned.replace("链接：", "")
+    cleaned = cleaned.replace("来源：", "")
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned
 
 
@@ -441,6 +465,10 @@ def _extract_key_lines(text: str, limit: int) -> list[str]:
             continue
         if any(marker in normalized for marker in BAD_TEXT_MARKERS):
             continue
+        if normalized.startswith("说明："):
+            continue
+        if "暂无可靠最新数据" in normalized:
+            continue
         lines.append(f"- {normalized}")
         if len(lines) >= limit:
             break
@@ -468,13 +496,18 @@ def _normalize_analysis(text: str) -> str:
 def _build_brief_header(positions: dict[str, Any]) -> str:
     """Build a one-screen summary that reads well on Telegram."""
     holdings = positions.get("positions", [])
-    top_holding = holdings[0].get("symbol", "暂无") if holdings else "暂无"
+    top_holding_position = next(
+        (position for position in holdings if not _is_cash_equivalent_position(position)),
+        holdings[0] if holdings else {},
+    )
+    top_holding = top_holding_position.get("symbol", "暂无")
     daily_pnl = float(positions.get("daily_pnl", 0.0))
     cash_pct = float(positions.get("cash_pct", 0.0))
+    report_date = str(positions.get("report_date", "")).strip()
     lines = [
         "一句话先看：",
-        f"- 你的账户今天 {_describe_daily_pnl(daily_pnl)}。",
-        f"- 当前仓位感觉：{_describe_cash_level(cash_pct)}，第一大持仓是 {top_holding}。",
+        f"- 这份报告基于 {report_date or '最新可用'} 的 IBKR 报表，你的账户今天 {_describe_daily_pnl(daily_pnl)}。",
+        f"- 当前仓位感觉：{_describe_cash_level(cash_pct)}，影响最大的持仓是 {top_holding}。",
     ]
     return "\n".join(lines)
 
@@ -523,6 +556,11 @@ def _describe_cash_level(cash_pct: float) -> str:
 def _describe_position(position: dict[str, Any]) -> str:
     """Describe a single holding in plain language."""
     pnl_pct = float(position.get("pnl_pct", 0.0))
+    side = str(position.get("side", "Long")).strip()
+    asset_category = str(position.get("asset_category", "")).strip()
+    market_value = float(position.get("market_value", 0.0))
+    currency = str(position.get("currency", "")).strip()
+    fx_rate = float(position.get("fx_rate_to_base", 0.0))
     if pnl_pct <= -20:
         mood = "回撤很重"
     elif pnl_pct <= -8:
@@ -533,7 +571,16 @@ def _describe_position(position: dict[str, Any]) -> str:
         mood = "小幅盈利"
     else:
         mood = "接近平盘"
-    return f"{mood}，成本 {float(position.get('avg_cost', 0.0)):.2f}，现价 {float(position.get('current_price', 0.0)):.2f}"
+    local_value_note = ""
+    if currency and market_value:
+        local_value_note = f"，本币市值 {market_value:,.0f} {currency}"
+        if fx_rate and fx_rate != 1:
+            local_value_note += f"，汇率 {fx_rate:.4f}"
+    return (
+        f"{mood}，{side.lower()} {asset_category.lower() or 'position'}，"
+        f"成本 {float(position.get('avg_cost', 0.0)):.2f}，现价 {float(position.get('current_price', 0.0)):.2f}"
+        f"{local_value_note}"
+    )
 
 
 def _format_signed_percent(value: float) -> str:
@@ -549,33 +596,57 @@ def _format_signed_number(value: float) -> str:
 def _normalize_portfolio(positions: dict[str, Any]) -> dict[str, Any]:
     """Normalize numeric portfolio fields once so downstream formatting stays simple."""
     total_value = _safe_float(positions.get("total_value", 0.0))
+    cash = _safe_float(positions.get("cash", 0.0))
+    daily_pnl = _safe_float(positions.get("daily_pnl", 0.0))
     normalized_positions: list[dict[str, Any]] = []
 
     for raw_position in positions.get("positions", []):
         market_value = _safe_float(raw_position.get("market_value", 0.0))
+        market_value_base = _safe_float(raw_position.get("market_value_base", market_value))
+        fx_rate_to_base = _safe_float(raw_position.get("fx_rate_to_base", 0.0)) or 1.0
         normalized_position = {
             "symbol": str(raw_position.get("symbol", "UNKNOWN")),
+            "description": str(raw_position.get("description", "")),
             "currency": str(raw_position.get("currency", "UNKNOWN")),
             "quantity": _safe_float(raw_position.get("quantity", 0.0)),
+            "side": str(raw_position.get("side", "Long")),
+            "asset_category": str(raw_position.get("asset_category", "")),
+            "account_id": str(raw_position.get("account_id", "")),
+            "account_alias": str(raw_position.get("account_alias", "")),
             "avg_cost": _safe_float(raw_position.get("avg_cost", 0.0)),
             "current_price": _safe_float(raw_position.get("current_price", 0.0)),
             "pnl_pct": _safe_float(raw_position.get("pnl_pct", 0.0)),
             "market_value": market_value,
-            "weight_pct": (market_value / total_value * 100) if total_value else 0.0,
+            "market_value_base": market_value_base,
+            "cost_basis_money": _safe_float(raw_position.get("cost_basis_money", 0.0)),
+            "cost_basis_base": _safe_float(raw_position.get("cost_basis_base", 0.0)),
+            "unrealized_pnl": _safe_float(raw_position.get("unrealized_pnl", 0.0)),
+            "unrealized_pnl_base": _safe_float(raw_position.get("unrealized_pnl_base", 0.0)),
+            "fx_rate_to_base": fx_rate_to_base,
+            "account_nav_pct": _safe_float(raw_position.get("account_nav_pct", 0.0)),
+            "report_date": str(raw_position.get("report_date", "")),
+            "weight_pct": (abs(market_value_base) / total_value * 100) if total_value else 0.0,
+            "net_weight_pct": (market_value_base / total_value * 100) if total_value else 0.0,
         }
         normalized_positions.append(normalized_position)
 
-    normalized_positions.sort(key=lambda item: item["market_value"], reverse=True)
+    normalized_positions.sort(key=lambda item: abs(item["market_value_base"]), reverse=True)
+
+    cash_pct = (cash / total_value * 100) if total_value else 0.0
+    daily_return_pct = (daily_pnl / total_value * 100) if total_value else 0.0
 
     return {
         **positions,
         "account_id": str(positions.get("account_id", "")),
+        "account_alias": str(positions.get("account_alias", "")),
         "scope": str(positions.get("scope", "")),
         "base_currency": str(positions.get("base_currency", "BASE")),
-        "cash": _safe_float(positions.get("cash", 0.0)),
+        "report_date": str(positions.get("report_date", "")),
+        "cash": cash,
         "total_value": total_value,
-        "daily_pnl": _safe_float(positions.get("daily_pnl", 0.0)),
-        "cash_pct": _safe_float(positions.get("cash_pct", 0.0)),
+        "daily_pnl": daily_pnl,
+        "daily_return_pct": daily_return_pct,
+        "cash_pct": cash_pct,
         "positions": normalized_positions,
     }
 
@@ -598,6 +669,25 @@ def _format_account_scope(scope: str, account_id: str) -> str:
     if scope == "mock":
         return "测试数据"
     return "账户视图"
+
+
+def _format_position_label(position: dict[str, Any]) -> str:
+    """Format a concise holding label with side when needed."""
+    symbol = str(position.get("symbol", "UNKNOWN"))
+    side = str(position.get("side", "Long")).strip().lower()
+    asset_category = str(position.get("asset_category", "")).strip()
+    if side == "short":
+        return f"{symbol}（Short {asset_category or 'Position'}）"
+    if asset_category and asset_category != "STK":
+        return f"{symbol}（{asset_category}）"
+    return symbol
+
+
+def _is_cash_equivalent_position(position: dict[str, Any]) -> bool:
+    """Identify treasury/cash-like ETFs so they are not treated like risky single-name bets."""
+    symbol = str(position.get("symbol", "")).upper()
+    description = str(position.get("description", "")).upper()
+    return symbol in {"SGOV", "BIL", "SHV", "JPST"} or "TREASURY" in description
 
 
 if __name__ == "__main__":

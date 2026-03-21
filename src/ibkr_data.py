@@ -170,6 +170,8 @@ def _parse_single_statement(statement: ET.Element) -> dict[str, Any]:
     total_value = 0.0
     base_currency = "BASE"
     account_id = statement.attrib.get("accountId", "UNKNOWN")
+    account_alias = statement.attrib.get("acctAlias", "")
+    latest_report_date: date | None = None
 
     for position in statement.findall(".//OpenPosition"):
         symbol = position.attrib.get("symbol", "").strip() or "UNKNOWN"
@@ -178,20 +180,50 @@ def _parse_single_statement(statement: ET.Element) -> dict[str, Any]:
         avg_cost = _to_float(position.attrib.get("costBasisPrice", "0"))
         current_price = _to_float(position.attrib.get("markPrice", "0"))
         market_value = _to_float(position.attrib.get("positionValue", "0"))
+        fx_rate_to_base = _to_float(position.attrib.get("fxRateToBase", "0")) or 1.0
+        market_value_base = market_value * fx_rate_to_base
+        cost_basis_money = _to_float(position.attrib.get("costBasisMoney", "0"))
+        cost_basis_base = cost_basis_money * fx_rate_to_base
+        unrealized_pnl = _to_float(position.attrib.get("fifoPnlUnrealized", "0"))
+        unrealized_pnl_base = unrealized_pnl * fx_rate_to_base
+        side = position.attrib.get("side", "Long").strip() or "Long"
+        asset_category = position.attrib.get("assetCategory", "").strip()
+        description = position.attrib.get("description", "").strip()
+        percent_of_nav = _to_float(position.attrib.get("percentOfNAV", "0"))
+        report_date = _parse_ibkr_date(position.attrib.get("reportDate"))
+        latest_report_date = max(filter(None, [latest_report_date, report_date]), default=latest_report_date)
 
-        pnl_pct = 0.0
-        if avg_cost:
-            pnl_pct = ((current_price - avg_cost) / avg_cost) * 100
+        pnl_basis = abs(cost_basis_money) or abs(market_value)
+        if pnl_basis:
+            pnl_pct = (unrealized_pnl / pnl_basis) * 100
+        elif avg_cost:
+            price_move_pct = ((current_price - avg_cost) / avg_cost) * 100
+            pnl_pct = -price_move_pct if side.lower() == "short" or quantity < 0 else price_move_pct
+        else:
+            pnl_pct = 0.0
 
         positions.append(
             {
                 "symbol": symbol,
+                "description": description,
                 "currency": currency,
                 "quantity": quantity,
+                "side": side,
+                "asset_category": asset_category,
+                "account_id": account_id,
+                "account_alias": position.attrib.get("acctAlias", account_alias).strip(),
                 "avg_cost": round(avg_cost, 2),
                 "current_price": round(current_price, 2),
                 "pnl_pct": round(pnl_pct, 2),
                 "market_value": round(market_value, 2),
+                "market_value_base": round(market_value_base, 2),
+                "cost_basis_money": round(cost_basis_money, 2),
+                "cost_basis_base": round(cost_basis_base, 2),
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "unrealized_pnl_base": round(unrealized_pnl_base, 2),
+                "fx_rate_to_base": round(fx_rate_to_base, 6),
+                "account_nav_pct": round(percent_of_nav, 2),
+                "report_date": report_date.isoformat() if report_date else "",
             }
         )
 
@@ -243,12 +275,14 @@ def _parse_single_statement(statement: ET.Element) -> dict[str, Any]:
 
     return {
         "account_id": account_id,
+        "account_alias": account_alias,
         "positions": positions,
         "base_currency": base_currency,
         "cash": round(cash, 2),
         "total_value": round(total_value, 2),
         "daily_pnl": round(daily_pnl, 2),
         "cash_pct": round(cash_pct, 2),
+        "report_date": latest_report_date.isoformat() if latest_report_date else "",
     }
 
 
@@ -260,6 +294,8 @@ def _aggregate_statements(statements: list[dict[str, Any]]) -> dict[str, Any]:
     total_value = 0.0
     daily_pnl = 0.0
     account_ids: list[str] = []
+    account_aliases: list[str] = []
+    report_dates: list[str] = []
 
     for statement in statements:
         positions.extend(statement.get("positions", []))
@@ -267,11 +303,18 @@ def _aggregate_statements(statements: list[dict[str, Any]]) -> dict[str, Any]:
         total_value += float(statement.get("total_value", 0.0))
         daily_pnl += float(statement.get("daily_pnl", 0.0))
         account_ids.append(str(statement.get("account_id", "UNKNOWN")))
+        alias = str(statement.get("account_alias", "")).strip()
+        if alias:
+            account_aliases.append(alias)
+        report_date = str(statement.get("report_date", "")).strip()
+        if report_date:
+            report_dates.append(report_date)
 
     cash_pct = (cash / total_value * 100) if total_value else 0.0
 
     return {
         "account_id": ",".join(account_ids),
+        "account_alias": ",".join(account_aliases),
         "scope": "aggregate",
         "positions": positions,
         "base_currency": base_currency,
@@ -279,6 +322,7 @@ def _aggregate_statements(statements: list[dict[str, Any]]) -> dict[str, Any]:
         "total_value": round(total_value, 2),
         "daily_pnl": round(daily_pnl, 2),
         "cash_pct": round(cash_pct, 2),
+        "report_date": max(report_dates) if report_dates else "",
     }
 
 
@@ -291,25 +335,34 @@ def _mock_portfolio_data() -> dict[str, Any]:
         "positions": [
             {
                 "symbol": "TSLA",
+                "description": "TESLA INC",
                 "quantity": 100,
+                "side": "Long",
+                "asset_category": "STK",
                 "avg_cost": 220.0,
                 "current_price": 185.0,
                 "pnl_pct": -15.91,
                 "market_value": 18500.0,
+                "market_value_base": 18500.0,
             },
             {
                 "symbol": "NVDA",
+                "description": "NVIDIA CORP",
                 "quantity": 20,
+                "side": "Long",
+                "asset_category": "STK",
                 "avg_cost": 780.0,
                 "current_price": 836.0,
                 "pnl_pct": 7.18,
                 "market_value": 16720.0,
+                "market_value_base": 16720.0,
             },
         ],
         "cash": 5000.0,
         "total_value": 40220.0,
         "daily_pnl": -340.0,
         "cash_pct": 12.43,
+        "report_date": datetime.now(IBKR_REPORTING_TZ).date().isoformat(),
     }
 
 
@@ -324,6 +377,7 @@ def _empty_portfolio() -> dict[str, Any]:
         "total_value": 0.0,
         "daily_pnl": 0.0,
         "cash_pct": 0.0,
+        "report_date": "",
     }
 
 

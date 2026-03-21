@@ -389,7 +389,7 @@ def _build_risk_chips(holdings: list[dict[str, Any]]) -> str:
             chips.append(_chip_html(f"{symbol} 回撤很深 {pnl_pct:+.1f}%", "danger"))
         elif pnl_pct <= -15:
             chips.append(_chip_html(f"{symbol} 接近止损线 {pnl_pct:+.1f}%", "warn"))
-        elif weight_pct >= 30:
+        elif weight_pct >= 30 and not _is_cash_equivalent_position(position):
             chips.append(_chip_html(f"{symbol} 仓位偏重 {weight_pct:.1f}%", "warn"))
         elif pnl_pct > 10:
             chips.append(_chip_html(f"{symbol} 目前盈利领先 {pnl_pct:+.1f}%", ""))
@@ -407,12 +407,17 @@ def _chip_html(text: str, tone: str) -> str:
 def _build_holding_row(position: dict[str, Any]) -> str:
     symbol = str(position.get("symbol", "UNKNOWN"))
     currency = str(position.get("currency", ""))
+    side = str(position.get("side", "Long"))
+    asset_category = str(position.get("asset_category", ""))
     weight_pct = float(position.get("weight_pct", 0.0))
+    net_weight_pct = float(position.get("net_weight_pct", 0.0))
     pnl_pct = float(position.get("pnl_pct", 0.0))
     market_value = float(position.get("market_value", 0.0))
+    market_value_base = float(position.get("market_value_base", market_value))
     avg_cost = float(position.get("avg_cost", 0.0))
     current_price = float(position.get("current_price", 0.0))
     tone_label, tone_class = _holding_tone(pnl_pct, weight_pct)
+    description = _holding_description(side, asset_category, currency, market_value, market_value_base, position)
 
     return f"""
     <article class="holding">
@@ -421,12 +426,15 @@ def _build_holding_row(position: dict[str, Any]) -> str:
         <span class="holding-tone{tone_class}">{escape(tone_label)}</span>
       </div>
       <div class="holding-grid">
-        <div><span class="label">仓位占比</span><span class="value">{weight_pct:.1f}%</span></div>
+        <div><span class="label">绝对仓位</span><span class="value">{weight_pct:.1f}%</span></div>
+        <div><span class="label">净敞口</span><span class="value">{net_weight_pct:+.1f}%</span></div>
         <div><span class="label">浮动盈亏</span><span class="value">{pnl_pct:+.1f}%</span></div>
         <div><span class="label">成本价</span><span class="value">{avg_cost:.2f}</span></div>
         <div><span class="label">现价</span><span class="value">{current_price:.2f}</span></div>
-        <div><span class="label">市值</span><span class="value">{market_value:,.0f} {escape(currency)}</span></div>
-        <div><span class="label">一句话状态</span><span class="value">{escape(_holding_summary(pnl_pct, weight_pct))}</span></div>
+        <div><span class="label">基币市值</span><span class="value">{market_value_base:,.0f}</span></div>
+        <div><span class="label">本币市值</span><span class="value">{market_value:,.0f} {escape(currency)}</span></div>
+        <div><span class="label">仓位属性</span><span class="value">{escape(description)}</span></div>
+        <div><span class="label">一句话状态</span><span class="value">{escape(_holding_summary(pnl_pct, weight_pct, side))}</span></div>
       </div>
     </article>
     """
@@ -440,18 +448,46 @@ def _holding_tone(pnl_pct: float, weight_pct: float) -> tuple[str, str]:
     return "可观察", ""
 
 
-def _holding_summary(pnl_pct: float, weight_pct: float) -> str:
+def _holding_summary(pnl_pct: float, weight_pct: float, side: str) -> str:
     if pnl_pct <= -20:
         return "回撤已经很深"
     if pnl_pct <= -10:
         return "走势偏弱"
     if weight_pct >= 30:
         return "仓位太重"
+    if side.strip().lower() == "short":
+        return "这是空头/卖方仓位"
     if pnl_pct >= 15:
         return "表现很强"
     if pnl_pct > 0:
         return "小幅盈利"
     return "接近平盘"
+
+
+def _holding_description(
+    side: str,
+    asset_category: str,
+    currency: str,
+    market_value: float,
+    market_value_base: float,
+    position: dict[str, Any],
+) -> str:
+    """Describe how this holding sits in the portfolio."""
+    asset_label = asset_category or "Position"
+    side_label = "Short" if side.strip().lower() == "short" else "Long"
+    fx_rate = float(position.get("fx_rate_to_base", 0.0))
+    if currency and fx_rate and fx_rate != 1:
+        return f"{side_label} {asset_label} | {currency} -> base @ {fx_rate:.4f}"
+    if market_value_base != market_value and currency:
+        return f"{side_label} {asset_label} | {currency}"
+    return f"{side_label} {asset_label}"
+
+
+def _is_cash_equivalent_position(position: dict[str, Any]) -> bool:
+    """Avoid flagging treasury ETFs as if they were concentrated single-stock bets."""
+    symbol = str(position.get("symbol", "")).upper()
+    description = str(position.get("description", "")).upper()
+    return symbol in {"SGOV", "BIL", "SHV", "JPST"} or "TREASURY" in description
 
 
 def _build_text_section(title: str, text: str) -> str:
@@ -467,7 +503,18 @@ def _strip_line(line: str) -> str:
     stripped = line.strip()
     if not stripped:
         return ""
-    return stripped.lstrip("-• ")
+    cleaned = stripped.lstrip("-• ")
+    blocked_fragments = (
+        "市场主线",
+        "科技与个股",
+        "今晚关注",
+        "根据搜索结果",
+        "说明：",
+        "暂无可靠最新数据",
+    )
+    if any(fragment in cleaned for fragment in blocked_fragments):
+        return ""
+    return cleaned
 
 
 def _split_analysis_sections(analysis: str) -> dict[str, str]:
