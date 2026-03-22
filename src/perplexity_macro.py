@@ -1,95 +1,31 @@
-"""Portfolio-aware market and news retrieval via Perplexity API."""
+"""Portfolio-aware market and news retrieval via a single Perplexity request."""
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from typing import Any
 
 from openai import OpenAI
 
 from src.networking import get_openai_compatible_client
 
-MACRO_FALLBACK = "宏观数据暂时不可用：请关注美股期货、VIX、美债收益率、DXY、黄金和原油的最新变化。"
-NEWS_FALLBACK = "主新闻快讯暂时不可用：请稍后重试 Perplexity 搜索。"
-PORTFOLIO_NEWS_FALLBACK = "组合相关资讯暂时不可用：请关注核心持仓财报、监管、行业景气和利率变化。"
+MARKET_BUNDLE_FALLBACK = {
+    "brief": "主新闻快讯暂时不可用：请稍后重试 Perplexity 搜索。",
+    "macro": "宏观数据暂时不可用：请关注美股期货、VIX、美债收益率、DXY、黄金和原油的最新变化。",
+    "portfolio_news": "组合相关资讯暂时不可用：请关注核心持仓财报、监管、行业景气和利率变化。",
+}
 
 
-def get_macro_data(research_plan: dict[str, Any] | None = None) -> str:
-    """Fetch key macro indicators from Perplexity with portfolio-aware emphasis."""
-    print("[Perplexity] Starting macro data request...")
+def get_market_bundle(research_plan: dict[str, Any], positions: dict[str, Any]) -> dict[str, str]:
+    """Fetch headline news, macro board, and portfolio-relevant news in one search call."""
+    print("[Perplexity] Starting combined market bundle request...")
 
     api_key = os.getenv("PERPLEXITY_API_KEY")
     if not api_key:
         print("[Perplexity] Missing PERPLEXITY_API_KEY.")
-        return MACRO_FALLBACK
-
-    focus_themes = ", ".join(research_plan.get("focus_themes", [])) if research_plan else ""
-    prompt = f"""请整理一版面向“美股 + 港股持仓用户”的宏观看板。
-
-当前组合最相关的主题是：{focus_themes or "利率、科技股、港股风险偏好、油价与美元流动性"}。
-
-只输出 5 到 6 行项目符号，每行格式固定为：
-- 指标名 | 最新值 | 方向/变化 | 一句话含义
-
-必须尽量覆盖：
-- 美股主要指数或期货
-- VIX
-- 10年期美债收益率
-- 美元指数 DXY
-- 黄金
-- 原油
-
-硬性要求：
-- 用简洁中文
-- 优先写美国市场和全球风险因子
-- 如果某个指标和 focus_themes 直接相关，优先保留
-- 不要输出链接、引用编号、来源说明、免责声明
-- 没拿到可靠数字就跳过，不要编造
-- 最后不要补总结段落"""
-
-    return _run_perplexity(prompt, "macro")
-
-
-def get_market_brief(research_plan: dict[str, Any] | None = None) -> str:
-    """Fetch the main market brief with portfolio-aware prioritization."""
-    print("[Perplexity] Starting verified market brief request...")
-
-    api_key = os.getenv("PERPLEXITY_API_KEY")
-    if not api_key:
-        print("[Perplexity] Missing PERPLEXITY_API_KEY for market brief.")
-        return NEWS_FALLBACK
-
-    focus_symbols = ", ".join(research_plan.get("focus_symbols", [])) if research_plan else ""
-    focus_themes = ", ".join(research_plan.get("focus_themes", [])) if research_plan else ""
-    prompt = f"""请基于实时搜索生成一版面向“美股 + 港股持仓用户”的市场主线摘要。
-
-当前组合最相关的代码：{focus_symbols or "AAPL, SGOV, 港股互联网/高股息, options"}。
-当前组合最相关的主题：{focus_themes or "美联储、科技股、利率、油价、港股风险偏好"}。
-
-输出要求：
-- 用中文
-- 只输出 5 条以内项目符号
-- 每条格式固定为：- 事实。市场含义。
-- 先写可核实事实，再写一句市场影响
-- 只保留最近 24 小时最重要的内容
-
-硬性要求：
-- 优先级必须是：美联储/美国利率 > 美股指数与科技 > 地缘与油价 > 与港股直接相关的因子
-- 不要输出标题、编号、链接、引用编号、来源说明
-- 不要写套话，不要写拒答语
-- 没有可靠事实就跳过，不要硬凑"""
-
-    return _run_perplexity(prompt, "brief")
-
-
-def get_portfolio_relevant_news(research_plan: dict[str, Any], positions: dict[str, Any]) -> str:
-    """Fetch the most portfolio-relevant news and drivers for the current holdings."""
-    print("[Perplexity] Starting portfolio-relevant news request...")
-
-    api_key = os.getenv("PERPLEXITY_API_KEY")
-    if not api_key:
-        print("[Perplexity] Missing PERPLEXITY_API_KEY for portfolio news.")
-        return PORTFOLIO_NEWS_FALLBACK
+        return dict(MARKET_BUNDLE_FALLBACK)
 
     focus_symbols = ", ".join(research_plan.get("focus_symbols", []))
     focus_themes = ", ".join(research_plan.get("focus_themes", []))
@@ -104,7 +40,7 @@ def get_portfolio_relevant_news(research_plan: dict[str, Any], positions: dict[s
         for position in positions.get("positions", [])[:6]
     )
 
-    prompt = f"""请基于实时搜索，只找“最可能影响这份组合”的最新资讯。
+    prompt = f"""请基于实时搜索，为一份投资日报一次性输出 3 个 section：主线新闻、宏观看板、组合相关资讯。
 
 【关注代码】
 {focus_symbols}
@@ -118,30 +54,24 @@ def get_portfolio_relevant_news(research_plan: dict[str, Any], positions: dict[s
 【要重点回答的问题】
 {news_questions or "- 哪些最新事件最可能影响这些持仓？"}
 
-输出要求：
-- 只输出 6 条以内项目符号
-- 每条格式固定为：- 代码/主题 | 最新事实 | 为什么影响这份组合
-- 优先覆盖：核心持仓公司、对应行业、利率/汇率/油价等传导因子
-- 只保留最近 72 小时内最相关的内容
+请严格输出 JSON，格式必须为：
+{{
+  "brief": ["主线新闻项目"],
+  "macro": ["宏观看板项目"],
+  "portfolio_news": ["最相关的组合资讯项目"]
+}}
+
+每个字段要求：
+- brief: 3 到 5 条，每条格式为“事实。市场含义。”
+- macro: 3 到 5 条，每条格式为“指标 | 最新值 | 方向/变化 | 一句话含义”
+- portfolio_news: 3 到 6 条，每条格式为“代码/主题 | 最新事实 | 为什么影响这份组合”
 
 硬性要求：
-- 不要输出链接、引用编号、来源说明
-- 不要写宏观空话
-- 如果某条新闻和组合关系弱，就不要写
-- 不能编造事实"""
-
-    return _run_perplexity(prompt, "portfolio")
-
-
-def _run_perplexity(prompt: str, kind: str) -> str:
-    """Run a Perplexity chat completion for the requested market task."""
-    api_key = os.getenv("PERPLEXITY_API_KEY")
-    if not api_key:
-        return {
-            "macro": MACRO_FALLBACK,
-            "brief": NEWS_FALLBACK,
-            "portfolio": PORTFOLIO_NEWS_FALLBACK,
-        }[kind]
+- 只保留最近 72 小时最相关的内容
+- 优先级必须是：美联储/美国利率 > 美股指数与科技 > 地缘与油价 > 与港股直接相关的因子
+- 组合相关资讯必须优先覆盖真正影响仓位的新闻，不要宏观空话
+- 不要输出链接、引用编号、来源说明、markdown、JSON 以外的文字
+- 如果某项没有可靠事实就返回空数组，不要编造"""
 
     try:
         client = _build_client(api_key)
@@ -151,8 +81,8 @@ def _run_perplexity(prompt: str, kind: str) -> str:
                 {
                     "role": "system",
                     "content": (
-                        "你是金融新闻编辑。只输出经过搜索确认的简洁事实行，不要链接，"
-                        "不要引用编号，不要标题，不要免责声明，不要空话。"
+                        "你是金融新闻编辑。只输出经过搜索确认的简洁 JSON，"
+                        "不要链接，不要引用编号，不要标题，不要免责声明，不要空话。"
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -160,18 +90,63 @@ def _run_perplexity(prompt: str, kind: str) -> str:
             temperature=0.1,
         )
         content = response.choices[0].message.content or ""
-        print(f"[Perplexity] {kind} request completed.")
-        cleaned = content.strip()
-        if cleaned:
-            return cleaned
+        payload = _extract_json_object(content)
+        print("[Perplexity] Combined market bundle request completed.")
+        return {
+            "brief": _join_lines(payload.get("brief"), MARKET_BUNDLE_FALLBACK["brief"]),
+            "macro": _join_lines(payload.get("macro"), MARKET_BUNDLE_FALLBACK["macro"]),
+            "portfolio_news": _join_lines(
+                payload.get("portfolio_news"),
+                MARKET_BUNDLE_FALLBACK["portfolio_news"],
+            ),
+        }
     except Exception as exc:
-        print(f"[Perplexity] {kind} request failed: {exc}")
+        print(f"[Perplexity] Combined market bundle request failed: {exc}")
+        return dict(MARKET_BUNDLE_FALLBACK)
 
-    return {
-        "macro": MACRO_FALLBACK,
-        "brief": NEWS_FALLBACK,
-        "portfolio": PORTFOLIO_NEWS_FALLBACK,
-    }[kind]
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """Extract the first JSON object from model output."""
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return json.loads(stripped)
+
+    match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
+    if not match:
+        raise ValueError(f"Could not parse JSON from Perplexity response: {stripped[:500]}")
+    return json.loads(match.group(0))
+
+
+def _join_lines(value: Any, fallback: str) -> str:
+    """Normalize a JSON array into a newline-joined text block."""
+    if not isinstance(value, list):
+        return fallback
+    lines = []
+    for item in value:
+        text = str(item).strip()
+        if not text or _is_empty_market_line(text):
+            continue
+        lines.append(text)
+    return "\n".join(lines) if lines else fallback
+
+
+def _is_empty_market_line(text: str) -> bool:
+    """Filter out placeholder items that look like empty or useless news."""
+    normalized = text.strip().lower()
+    empty_markers = (
+        "无72小时内直接新闻",
+        "暂无直接新闻",
+        "暂无相关新闻",
+        "无可靠最新值",
+        "无可靠最新数据",
+        "暂无可靠最新值",
+        "空。",
+        "空 |",
+        "| 空",
+        "暂无更新",
+        "没有可靠事实",
+    )
+    return any(marker in normalized for marker in empty_markers)
 
 
 def _build_client(api_key: str) -> OpenAI:

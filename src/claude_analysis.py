@@ -17,24 +17,6 @@ PERPLEXITY_AGENT_BASE_URL = "https://api.perplexity.ai/v1"
 PERPLEXITY_CLAUDE_MODEL = "anthropic/claude-sonnet-4-6"
 PERPLEXITY_FALLBACK_MODEL = "sonar-pro"
 
-RESEARCH_SYSTEM_PROMPT = """你是投资研究助手。
-
-任务顺序：
-1. 先读账户与持仓事实
-2. 提炼最该研究的持仓、风险和新闻方向
-3. 输出严格 JSON，不要解释，不要 markdown，不要额外文字
-
-硬性规则：
-- 只能使用输入里已有的数字和持仓
-- 不要自己改写百分比
-- 绝对仓位看 weight_pct，净敞口看 net_weight_pct
-- 如果持仓是 short，必须明确标记为 short
-- SGOV / BIL / SHV / JPST 这类现金等价物不应被当成高 beta 个股风险
-- focus_symbols 最多 5 个
-- focus_themes 最多 6 个
-- risk_flags 最多 6 条
-- news_questions 最多 6 条"""
-
 FINAL_SYSTEM_PROMPT = """你是私人投资简报撰写助手。
 
 你的职责不是重新计算数字，而是基于系统已经算好的账户事实、研究计划和最新资讯做解释。
@@ -66,40 +48,33 @@ FINAL_SYSTEM_PROMPT = """你是私人投资简报撰写助手。
 
 
 def analyze_portfolio(positions: dict[str, Any]) -> dict[str, Any]:
-    """Create a portfolio-first research plan before external news collection."""
+    """Create a deterministic portfolio-first research plan without an extra AI call."""
     print("[Analysis] Building portfolio research plan...")
+    holdings = positions.get("positions", [])
+    risk_holdings = [position for position in holdings if _is_risk_focus(position)]
+    core_holdings = [position for position in holdings if not _is_cash_equivalent_position(position)]
+    ranked = sorted(
+        core_holdings,
+        key=lambda item: (
+            _is_risk_focus(item),
+            float(item.get("weight_pct", 0.0)),
+            abs(float(item.get("pnl_pct", 0.0))),
+        ),
+        reverse=True,
+    )
+    focus_positions = ranked[:5] or holdings[:5]
 
-    payload = _build_portfolio_payload(positions)
-    prompt = f"""下面是已经算好的账户事实。
-请先判断这份组合最需要研究哪些持仓、哪些风险、哪些新闻问题。
-
-【账户事实 JSON】
-{json.dumps(payload, ensure_ascii=False, indent=2)}
-
-请严格输出 JSON，格式必须为：
-{{
-  "portfolio_view": "一句话概括组合现在的状态",
-  "focus_symbols": ["最该跟踪的代码"],
-  "focus_themes": ["最该跟踪的主题"],
-  "risk_flags": ["最重要的风险点"],
-  "news_questions": ["接下来应重点搜索的问题"]
-}}
-
-要求：
-- portfolio_view 只写一句话
-- focus_symbols 优先放真正影响组合波动的持仓
-- news_questions 要能直接拿去搜新闻
-- 不要输出 JSON 以外的任何文字"""
-
-    raw = _run_primary_model(RESEARCH_SYSTEM_PROMPT, prompt, max_output_tokens=1200)
-    plan = _extract_json_object(raw)
+    focus_symbols = [str(position.get("symbol", "UNKNOWN")) for position in focus_positions]
+    focus_themes = _build_focus_themes(focus_positions)
+    risk_flags = _build_portfolio_flags(holdings)
+    news_questions = _build_news_questions(focus_positions, risk_flags)
 
     return {
-        "portfolio_view": str(plan.get("portfolio_view", "")).strip(),
-        "focus_symbols": _limit_string_list(plan.get("focus_symbols"), 5),
-        "focus_themes": _limit_string_list(plan.get("focus_themes"), 6),
-        "risk_flags": _limit_string_list(plan.get("risk_flags"), 6),
-        "news_questions": _limit_string_list(plan.get("news_questions"), 6),
+        "portfolio_view": _build_portfolio_view(positions, focus_positions, risk_flags),
+        "focus_symbols": focus_symbols[:5],
+        "focus_themes": focus_themes[:6],
+        "risk_flags": risk_flags[:6],
+        "news_questions": news_questions[:6],
     }
 
 
@@ -382,32 +357,6 @@ def _build_top_holdings(holdings: list[dict[str, Any]], base_currency: str) -> l
     return top_holdings
 
 
-def _extract_json_object(text: str) -> dict[str, Any]:
-    """Extract the first JSON object from model text safely."""
-    stripped = text.strip()
-    if stripped.startswith("{") and stripped.endswith("}"):
-        return json.loads(stripped)
-
-    match = re.search(r"\{.*\}", stripped, flags=re.DOTALL)
-    if not match:
-        raise ValueError(f"Could not find JSON object in model response: {stripped[:500]}")
-    return json.loads(match.group(0))
-
-
-def _limit_string_list(value: Any, limit: int) -> list[str]:
-    """Normalize arbitrary list-like model output into a bounded string list."""
-    if not isinstance(value, list):
-        return []
-    normalized: list[str] = []
-    for item in value:
-        text = str(item).strip()
-        if text:
-            normalized.append(text)
-        if len(normalized) >= limit:
-            break
-    return normalized
-
-
 def _clean_market_line(line: str) -> str:
     """Trim market lines down to facts that are safe to show to the model."""
     cleaned = line.strip()
@@ -439,3 +388,91 @@ def _is_cash_equivalent_position(position: dict[str, Any]) -> bool:
     symbol = str(position.get("symbol", "")).upper()
     description = str(position.get("description", "")).upper()
     return symbol in {"SGOV", "BIL", "SHV", "JPST"} or "TREASURY" in description
+
+
+def _is_risk_focus(position: dict[str, Any]) -> bool:
+    """Identify holdings that deserve extra research priority."""
+    weight_pct = float(position.get("weight_pct", 0.0))
+    pnl_pct = float(position.get("pnl_pct", 0.0))
+    side = str(position.get("side", "Long")).strip().lower()
+    return pnl_pct <= -10 or weight_pct >= 20 or side == "short"
+
+
+def _build_focus_themes(focus_positions: list[dict[str, Any]]) -> list[str]:
+    """Map the current holdings into the most relevant research themes."""
+    themes: list[str] = []
+
+    for position in focus_positions:
+        symbol = str(position.get("symbol", "")).upper()
+        asset_category = str(position.get("asset_category", "")).upper()
+        currency = str(position.get("currency", "")).upper()
+        description = str(position.get("description", "")).upper()
+
+        if symbol in {"AAPL", "QQQ", "JEPQ", "NVDA", "MSFT"}:
+            themes.append("美股科技与纳斯达克风险偏好")
+        if symbol in {"700", "3416"} or currency == "HKD":
+            themes.append("港股风险偏好与中国互联网/高股息情绪")
+        if asset_category == "OPT":
+            themes.append("期权到期与波动率风险")
+        if symbol in {"SGOV", "BIL", "SHV", "JPST"} or "TREASURY" in description:
+            themes.append("美联储路径与短端利率")
+        if currency == "USD":
+            themes.append("美元利率与美元资产表现")
+
+    return _dedupe_strings(themes)[:6]
+
+
+def _build_news_questions(focus_positions: list[dict[str, Any]], risk_flags: list[str]) -> list[str]:
+    """Generate targeted news questions without using an extra model call."""
+    questions: list[str] = []
+
+    for position in focus_positions:
+        symbol = str(position.get("symbol", "UNKNOWN"))
+        side = str(position.get("side", "Long")).strip().lower()
+        asset_category = str(position.get("asset_category", "")).upper()
+
+        questions.append(f"{symbol} 最近 72 小时有哪些最可能影响股价或估值的消息？")
+        if asset_category == "OPT":
+            questions.append(f"{symbol} 距到期前最关键的标的价格、波动率或事件风险是什么？")
+        if side == "short":
+            questions.append(f"{symbol} 这类 short 仓位现在最需要防范的反向风险是什么？")
+
+    if any("利率" in flag or "仓位" in flag for flag in risk_flags):
+        questions.append("美联储、10年美债和美元最近的变化，哪个最可能影响这份组合？")
+    if any("港" in position.get("currency", "") or position.get("symbol", "") in {"700", "3416"} for position in focus_positions):
+        questions.append("港股互联网与高股息相关资产最近的情绪和催化剂是什么？")
+
+    return _dedupe_strings(questions)[:6]
+
+
+def _build_portfolio_view(
+    positions: dict[str, Any],
+    focus_positions: list[dict[str, Any]],
+    risk_flags: list[str],
+) -> str:
+    """Create a short plain-language summary of the portfolio state."""
+    total_value = float(positions.get("total_value", 0.0))
+    cash_pct = float(positions.get("cash_pct", 0.0))
+    daily_return_pct = float(positions.get("daily_return_pct", 0.0))
+    biggest = focus_positions[0].get("symbol", "核心持仓") if focus_positions else "核心持仓"
+
+    if risk_flags:
+        return (
+            f"总资产约 {total_value:,.0f}，单日回报 {daily_return_pct:+.1f}%，"
+            f"现金 {cash_pct:.1f}%，当前最需要盯 {biggest} 和已触发的风险位。"
+        )
+    return (
+        f"总资产约 {total_value:,.0f}，单日回报 {daily_return_pct:+.1f}%，"
+        f"现金 {cash_pct:.1f}%，当前主要波动来自 {biggest}。"
+    )
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    """Preserve order while removing duplicate strings."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result

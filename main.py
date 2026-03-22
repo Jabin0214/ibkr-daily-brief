@@ -18,7 +18,7 @@ from src.claude_analysis import analyze_portfolio, generate_analysis
 from src.grok_news import get_market_news
 from src.ibkr_data import get_ibkr_positions
 from src.notify import send_telegram, send_telegram_document
-from src.perplexity_macro import get_macro_data, get_market_brief, get_portfolio_relevant_news
+from src.perplexity_macro import get_market_bundle
 from src.reporting import write_daily_report
 
 NEWS_MARKET_FALLBACK = (
@@ -42,6 +42,13 @@ BAD_TEXT_MARKERS = (
     "科技与个股",
     "今晚关注",
     "链接：",
+    "暂无直接新闻",
+    "暂无相关新闻",
+    "暂无更新",
+    "没有可靠事实",
+    "无72小时内直接新闻",
+    "无可靠最新值",
+    "空。",
 )
 
 
@@ -113,22 +120,17 @@ def _fetch_market_context(
     research_plan: dict[str, Any] | None = None,
     positions: dict[str, Any] | None = None,
 ) -> MarketContext:
-    """Fetch market brief, macro data, relevant portfolio news, and X sentiment in parallel."""
+    """Fetch the combined market bundle and X sentiment in parallel."""
     print("[Main] Step 3/5: Fetching targeted market intelligence...")
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        brief_future = executor.submit(get_market_brief, research_plan)
-        macro_future = executor.submit(get_macro_data, research_plan)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        bundle_future = executor.submit(get_market_bundle, research_plan or {}, positions or {})
         sentiment_future = executor.submit(get_market_news, research_plan)
-        portfolio_news_future = executor.submit(
-            get_portfolio_relevant_news,
-            research_plan or {},
-            positions or {},
-        )
+        bundle = bundle_future.result()
         return MarketContext(
-            brief=_normalize_market_text(brief_future.result(), NEWS_MARKET_FALLBACK),
-            macro=macro_future.result(),
+            brief=_normalize_market_text(bundle.get("brief", ""), NEWS_MARKET_FALLBACK),
+            macro=bundle.get("macro", ""),
             portfolio_news=_normalize_market_text(
-                portfolio_news_future.result(),
+                bundle.get("portfolio_news", ""),
                 "组合相关资讯暂时不完整，请优先关注核心持仓财报、利率与行业景气变化。",
             ),
             sentiment=sentiment_future.result(),
@@ -437,8 +439,8 @@ def _print_runtime(start_time: float, estimated_cost: float) -> None:
 def _estimate_cost() -> float:
     """Return a simple fixed cost estimate for the daily run."""
     grok_estimate = 0.02
-    perplexity_news_estimate = 0.03
-    perplexity_claude_estimate = 0.06
+    perplexity_news_estimate = 0.012
+    perplexity_claude_estimate = 0.04
     return grok_estimate + perplexity_news_estimate + perplexity_claude_estimate
 
 
