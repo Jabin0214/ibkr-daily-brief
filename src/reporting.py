@@ -13,13 +13,14 @@ def write_daily_report(
     analysis: str,
     market: dict[str, str],
     positions: dict[str, Any],
+    research: dict[str, Any],
     output_dir: Path,
 ) -> Path:
     """Write a styled HTML daily report and return its path."""
     output_dir.mkdir(parents=True, exist_ok=True)
     report_date = datetime.now().strftime("%Y-%m-%d")
     report_path = output_dir / f"daily-brief-{report_date}.html"
-    html = _build_html(analysis, market, positions, report_date)
+    html = _build_html(analysis, market, positions, research, report_date)
     report_path.write_text(html, encoding="utf-8")
     return report_path
 
@@ -28,6 +29,7 @@ def _build_html(
     analysis: str,
     market: dict[str, str],
     positions: dict[str, Any],
+    research: dict[str, Any],
     report_date: str,
 ) -> str:
     total_value = float(positions.get("total_value", 0.0))
@@ -45,6 +47,7 @@ def _build_html(
         )
     )
     risk_chips = _build_risk_chips(holdings)
+    research_chips = _build_research_chips(research)
     holding_rows = "".join(_build_holding_row(position) for position in holdings[:8])
     if not holding_rows:
         holding_rows = '<div class="empty-state">暂无持仓数据</div>'
@@ -53,6 +56,7 @@ def _build_html(
     market_sections = [
         ("市场主线", market.get("brief", "")),
         ("宏观看板", market.get("macro", "")),
+        ("组合相关资讯", market.get("portfolio_news", "")),
         ("市场情绪", market.get("sentiment", "")),
     ]
     rendered_market = "".join(_build_text_section(title, content) for title, content in market_sections)
@@ -328,6 +332,12 @@ def _build_html(
     </section>
 
     <section class="block">
+      <h2>研究重点</h2>
+      <p class="subcopy">先基于你的持仓做组合画像，再围着这些点去抓资讯。</p>
+      <div class="chips">{research_chips}</div>
+    </section>
+
+    <section class="block">
       <h2>核心持仓</h2>
       <p class="subcopy">按仓位从大到小排列，先看最影响账户波动的几笔。</p>
       <div class="holding-list">{holding_rows}</div>
@@ -397,6 +407,25 @@ def _build_risk_chips(holdings: list[dict[str, Any]]) -> str:
     if not chips:
         chips.append(_chip_html("今晚没有特别刺眼的风险位", ""))
     return "".join(chips[:6])
+
+
+def _build_research_chips(research: dict[str, Any]) -> str:
+    """Render holdings-driven research priorities."""
+    chips: list[str] = []
+
+    portfolio_view = str(research.get("portfolio_view", "")).strip()
+    if portfolio_view:
+        chips.append(_chip_html(portfolio_view, ""))
+
+    for symbol in research.get("focus_symbols", [])[:4]:
+        chips.append(_chip_html(f"重点代码：{symbol}", "warn"))
+
+    for theme in research.get("focus_themes", [])[:3]:
+        chips.append(_chip_html(f"重点主题：{theme}", ""))
+
+    if not chips:
+        chips.append(_chip_html("今晚没有额外的组合研究重点", ""))
+    return "".join(chips[:8])
 
 
 def _chip_html(text: str, tone: str) -> str:
@@ -518,7 +547,7 @@ def _strip_line(line: str) -> str:
 
 
 def _split_analysis_sections(analysis: str) -> dict[str, str]:
-    headings = ("市场判断", "组合解读", "风险提醒", "今日动作")
+    headings = ("市场判断", "相关资讯", "组合解读", "风险提醒", "今日动作")
     pattern = re.compile(rf"^\s*({'|'.join(headings)})\s*$", re.MULTILINE)
     matches = list(pattern.finditer(analysis))
     if not matches:

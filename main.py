@@ -14,11 +14,11 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from src.claude_analysis import generate_analysis
+from src.claude_analysis import analyze_portfolio, generate_analysis
 from src.grok_news import get_market_news
 from src.ibkr_data import get_ibkr_positions
 from src.notify import send_telegram, send_telegram_document
-from src.perplexity_macro import get_macro_data, get_market_brief
+from src.perplexity_macro import get_macro_data, get_market_brief, get_portfolio_relevant_news
 from src.reporting import write_daily_report
 
 NEWS_MARKET_FALLBACK = (
@@ -51,6 +51,7 @@ class MarketContext:
 
     brief: str
     macro: str
+    portfolio_news: str
     sentiment: str
 
 
@@ -66,18 +67,19 @@ def main() -> int:
     print(f"[Main] Send mode: {args.send}")
 
     try:
-        market = _fetch_market_context()
-
         if args.news_only:
+            market = _fetch_market_context()
             news_flash = _build_news_flash(market)
             _emit_output(news_flash, args.send, "news flash")
             _print_runtime(start_time, _estimate_news_cost())
             return 0
 
         positions = _fetch_portfolio(args.test)
-        analysis = _generate_investment_analysis(market, positions)
+        research_plan = _build_portfolio_research_plan(positions)
+        market = _fetch_market_context(research_plan, positions)
+        analysis = _generate_investment_analysis(positions, research_plan, market)
         final_message = _build_daily_brief(market, positions, analysis)
-        report_path = _write_detailed_report(analysis, market, positions)
+        report_path = _write_detailed_report(analysis, market, positions, research_plan)
 
         _emit_output(final_message, args.send, "daily brief", report_path=report_path)
         _print_runtime(start_time, _estimate_cost())
@@ -107,34 +109,56 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _fetch_market_context() -> MarketContext:
-    """Fetch market brief, macro data, and X sentiment in parallel."""
-    print("[Main] Step 1/4: Fetching market intelligence...")
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        brief_future = executor.submit(get_market_brief)
-        macro_future = executor.submit(get_macro_data)
-        sentiment_future = executor.submit(get_market_news)
+def _fetch_market_context(
+    research_plan: dict[str, Any] | None = None,
+    positions: dict[str, Any] | None = None,
+) -> MarketContext:
+    """Fetch market brief, macro data, relevant portfolio news, and X sentiment in parallel."""
+    print("[Main] Step 3/5: Fetching targeted market intelligence...")
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        brief_future = executor.submit(get_market_brief, research_plan)
+        macro_future = executor.submit(get_macro_data, research_plan)
+        sentiment_future = executor.submit(get_market_news, research_plan)
+        portfolio_news_future = executor.submit(
+            get_portfolio_relevant_news,
+            research_plan or {},
+            positions or {},
+        )
         return MarketContext(
             brief=_normalize_market_text(brief_future.result(), NEWS_MARKET_FALLBACK),
             macro=macro_future.result(),
+            portfolio_news=_normalize_market_text(
+                portfolio_news_future.result(),
+                "组合相关资讯暂时不完整，请优先关注核心持仓财报、利率与行业景气变化。",
+            ),
             sentiment=sentiment_future.result(),
         )
 
 
 def _fetch_portfolio(test_mode: bool) -> dict[str, Any]:
     """Fetch live or mock portfolio data."""
-    print("[Main] Step 2/4: Fetching portfolio snapshot...")
+    print("[Main] Step 1/5: Fetching portfolio snapshot...")
     if test_mode:
         print("[Main] Using mock positions for test mode.")
         return _normalize_portfolio(_get_test_positions())
     return _normalize_portfolio(get_ibkr_positions())
 
 
-def _generate_investment_analysis(market: MarketContext, positions: dict[str, Any]) -> str:
+def _build_portfolio_research_plan(positions: dict[str, Any]) -> dict[str, Any]:
+    """Analyze the portfolio first so downstream news retrieval is holdings-aware."""
+    print("[Main] Step 2/5: Building portfolio research plan...")
+    return analyze_portfolio(positions)
+
+
+def _generate_investment_analysis(
+    positions: dict[str, Any],
+    research_plan: dict[str, Any],
+    market: MarketContext,
+) -> str:
     """Generate the final investment analysis from market and portfolio inputs."""
-    print("[Main] Step 3/4: Generating investment analysis...")
+    print("[Main] Step 4/5: Generating final investment analysis...")
     news_context = _build_analysis_news_context(market)
-    return generate_analysis(news_context, positions)
+    return generate_analysis(positions, research_plan, news_context)
 
 
 def _emit_output(message: str, send: bool, label: str, report_path: Path | None = None) -> None:
@@ -171,6 +195,8 @@ def _build_analysis_news_context(market: MarketContext) -> str:
         f"{market.brief}\n\n"
         "【Perplexity 宏观看板】\n"
         f"{market.macro}\n\n"
+        "【Perplexity 组合相关资讯】\n"
+        f"{market.portfolio_news}\n\n"
         "【Grok X 情绪】\n"
         f"{market.sentiment}"
     )
@@ -205,13 +231,15 @@ def _build_market_snapshot(market: MarketContext) -> str:
     """Build a compact market snapshot block for the daily brief."""
     brief_lines = _extract_key_lines(market.brief, limit=3)
     macro_lines = _extract_key_lines(market.macro, limit=3)
+    portfolio_news_lines = _extract_key_lines(market.portfolio_news, limit=4)
     sentiment_lines = _extract_key_lines(market.sentiment, limit=2)
 
     sections = [
         "🌍 市场情报",
-        "先看这 3 组信息：",
+        "先看这 4 组信息：",
         _format_section_block("主线新闻", brief_lines, "暂无主线新闻"),
         _format_section_block("宏观看板", macro_lines, "暂无宏观数据"),
+        _format_section_block("组合相关资讯", portfolio_news_lines, "暂无组合相关资讯"),
         _format_section_block("市场情绪", sentiment_lines, "暂无情绪摘要"),
     ]
     return "\n".join(sections)
@@ -381,17 +409,20 @@ def _write_detailed_report(
     analysis: str,
     market: MarketContext,
     positions: dict[str, Any],
+    research_plan: dict[str, Any],
 ) -> Path:
     """Generate a detailed HTML report for archive and Telegram delivery."""
-    print("[Main] Step 4/4: Building detailed HTML report...")
+    print("[Main] Step 5/5: Building detailed HTML report...")
     return write_daily_report(
         analysis=_normalize_analysis(analysis),
         market={
             "brief": _clean_for_telegram(market.brief),
             "macro": _clean_for_telegram(market.macro),
+            "portfolio_news": _clean_for_telegram(market.portfolio_news),
             "sentiment": _clean_for_telegram(market.sentiment),
         },
         positions=positions,
+        research=research_plan,
         output_dir=Path(__file__).with_name("reports"),
     )
 
@@ -406,9 +437,9 @@ def _print_runtime(start_time: float, estimated_cost: float) -> None:
 def _estimate_cost() -> float:
     """Return a simple fixed cost estimate for the daily run."""
     grok_estimate = 0.02
-    perplexity_estimate = 0.01
-    claude_estimate = 0.04
-    return grok_estimate + perplexity_estimate + claude_estimate
+    perplexity_news_estimate = 0.03
+    perplexity_claude_estimate = 0.06
+    return grok_estimate + perplexity_news_estimate + perplexity_claude_estimate
 
 
 def _estimate_news_cost() -> float:
@@ -487,6 +518,7 @@ def _normalize_analysis(text: str) -> str:
     cleaned = cleaned.replace("立即警告", "需要重点警惕")
     cleaned = cleaned.replace("暂不加仓", "更适合暂不加仓")
     cleaned = re.sub(r"^\s*市场判断\s*$", "市场判断", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"^\s*相关资讯\s*$", "\n相关资讯", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"^\s*组合解读\s*$", "\n组合解读", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"^\s*风险提醒\s*$", "\n风险提醒", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"^\s*今日动作\s*$", "\n今日动作", cleaned, flags=re.MULTILINE)
