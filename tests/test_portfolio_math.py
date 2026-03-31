@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from main import _normalize_portfolio
-from src.claude_analysis import analyze_portfolio
-from src.ibkr_data import _parse_portfolio_xml
-from src.perplexity_macro import _join_lines
+from src.core.analysis.position_analysis import build_research_plan, normalize_portfolio
+from src.core.providers.ibkr_client import _parse_portfolio_xml
+from src.core.providers.news_client import _join_lines
 
 
 SAMPLE_XML = """
@@ -59,7 +58,7 @@ SAMPLE_XML = """
 class PortfolioMathTests(unittest.TestCase):
     def test_cross_currency_weight_uses_base_value(self) -> None:
         parsed = _parse_portfolio_xml(SAMPLE_XML)
-        normalized = _normalize_portfolio(parsed)
+        normalized = normalize_portfolio(parsed)
 
         aapl = next(position for position in normalized["positions"] if position["symbol"] == "AAPL")
         self.assertAlmostEqual(aapl["market_value_base"], 390055.59, places=2)
@@ -68,7 +67,7 @@ class PortfolioMathTests(unittest.TestCase):
 
     def test_short_position_uses_unrealized_pnl_direction(self) -> None:
         parsed = _parse_portfolio_xml(SAMPLE_XML)
-        normalized = _normalize_portfolio(parsed)
+        normalized = normalize_portfolio(parsed)
 
         short_put = next(
             position for position in normalized["positions"] if position["symbol"] == "TCH MAR26 530 P"
@@ -79,7 +78,7 @@ class PortfolioMathTests(unittest.TestCase):
         self.assertAlmostEqual(short_put["net_weight_pct"], -0.21, places=2)
 
     def test_programmatic_research_plan_prioritizes_risk_assets(self) -> None:
-        positions = _normalize_portfolio(
+        positions = normalize_portfolio(
             {
                 "account_id": "TEST",
                 "scope": "mock",
@@ -132,7 +131,7 @@ class PortfolioMathTests(unittest.TestCase):
             }
         )
 
-        plan = analyze_portfolio(positions)
+        plan = build_research_plan(positions)
         self.assertIn("AAPL", plan["focus_symbols"])
         self.assertIn("700", plan["focus_symbols"])
         self.assertIn("TCH MAR26 530 P", plan["focus_symbols"])

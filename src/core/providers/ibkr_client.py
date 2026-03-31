@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from src.networking import DEFAULT_TIMEOUT, get_requests_session
+from src.core.providers.networking import DEFAULT_TIMEOUT, get_requests_session
 
 FLEX_REQUEST_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/SendRequest"
 FLEX_STATEMENT_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService/GetStatement"

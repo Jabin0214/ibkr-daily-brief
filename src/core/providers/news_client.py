@@ -10,7 +10,7 @@ from typing import Any
 
 from openai import OpenAI
 
-from src.networking import get_openai_compatible_client
+from src.core.providers.networking import get_openai_compatible_client
 
 MARKET_BUNDLE_FALLBACK = {
     "brief": "主新闻快讯暂时不可用：请稍后重试 Perplexity 搜索。",

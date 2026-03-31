@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.ibkr_middleware import build_ibkr_analysis_payload
+from src.core.analysis.portfolio_context import build_ibkr_analysis_payload
 
 
 SAMPLE_XML = """

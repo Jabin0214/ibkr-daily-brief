@@ -6,7 +6,7 @@ import os
 import time
 from pathlib import Path
 
-from src.networking import DEFAULT_TIMEOUT, get_requests_session
+from src.core.providers.networking import DEFAULT_TIMEOUT, get_requests_session
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 
