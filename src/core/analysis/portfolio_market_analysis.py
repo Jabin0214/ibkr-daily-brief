@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from src.core.analysis.position_analysis import build_portfolio_flags
-from src.core.providers.llm_client import run_analysis_model
+from src.core.providers.ai_client import run_analysis_model
 
 FINAL_SYSTEM_PROMPT = """你是私人投资简报撰写助手。
 

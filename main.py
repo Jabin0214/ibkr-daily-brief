@@ -10,10 +10,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from src.interface.telegram.delivery import deliver_failure_alert, deliver_message, deliver_report
+from src.interface.telegram.presenter import render_daily_report, render_news_flash, render_portfolio_snapshot
 from src.pipeline.daily_report import (
-    deliver_failure_alert,
-    deliver_message,
-    deliver_report,
     run_daily_report_pipeline,
     run_ibkr_payload_pipeline,
     run_ibkr_snapshot_pipeline,
@@ -42,7 +41,8 @@ def main() -> int:
             return 0
 
         if args.ibkr_only:
-            snapshot = run_ibkr_snapshot_pipeline(test_mode=args.test)
+            positions = run_ibkr_snapshot_pipeline(test_mode=args.test)
+            snapshot = render_portfolio_snapshot(positions)
             print(snapshot)
             if args.send:
                 deliver_message(snapshot)
@@ -50,7 +50,8 @@ def main() -> int:
             return 0
 
         if args.news_only:
-            news_flash = run_news_only_pipeline()
+            market = run_news_only_pipeline()
+            news_flash = render_news_flash(market)
             print(news_flash)
             if args.send:
                 deliver_message(news_flash)
@@ -58,13 +59,20 @@ def main() -> int:
             return 0
 
         output_dir = Path(__file__).with_name("reports")
-        message, report_path = run_daily_report_pipeline(
+        artifacts = run_daily_report_pipeline(
             test_mode=args.test,
+            output_dir=output_dir,
+        )
+        message, report_path = render_daily_report(
+            market=artifacts.market,
+            positions=artifacts.positions,
+            analysis=artifacts.analysis,
+            research_plan=artifacts.research_plan,
             output_dir=output_dir,
         )
         print(f"[Main] Detailed report saved to: {report_path}")
         if args.send:
-            deliver_report(message, report_path)
+            deliver_report(report_path)
         else:
             print(message)
         _print_runtime(start_time, _estimate_full_cost())

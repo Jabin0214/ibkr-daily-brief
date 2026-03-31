@@ -1,19 +1,20 @@
-"""Middleware for extracting analysis-ready signals from IBKR Flex statements."""
+"""Portfolio context extraction and IBKR statement parsing."""
 
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
-from src.core.providers.ibkr_client import _mock_portfolio_data, _parse_ibkr_date, _parse_portfolio_xml, _to_float
+from src.core.providers.ibkr_client import IBKR_REPORTING_TZ
 
 
 def build_ibkr_analysis_payload(xml_text: str) -> dict[str, Any]:
     """Build an analysis-ready payload from an IBKR Flex statement XML string."""
     root = ET.fromstring(xml_text)
-    statements = root.findall(".//FlexStatement")
-    portfolio = _normalize_portfolio(_parse_portfolio_xml(xml_text))
+    statements = _find_flex_statements(root)
+    portfolio = _normalize_portfolio(parse_portfolio_xml(xml_text))
     fx_rates = _extract_conversion_rates(root)
 
     account_summaries = [_build_account_summary(statement) for statement in statements]
@@ -66,7 +67,7 @@ def build_ibkr_analysis_payload(xml_text: str) -> dict[str, Any]:
 
 def build_mock_ibkr_analysis_payload() -> dict[str, Any]:
     """Return a payload with only portfolio data when live XML is unavailable."""
-    portfolio = _normalize_portfolio(_mock_portfolio_data())
+    portfolio = _normalize_portfolio(mock_portfolio_data())
     return {
         "meta": {
             "report_date": portfolio.get("report_date", ""),
@@ -115,6 +116,62 @@ def build_mock_ibkr_analysis_payload() -> dict[str, Any]:
     }
 
 
+def parse_portfolio_xml(xml_text: str) -> dict[str, Any]:
+    """Parse IBKR XML into the project portfolio structure."""
+    root = ET.fromstring(xml_text)
+    statements = _find_flex_statements(root)
+
+    if not statements:
+        return _empty_portfolio()
+
+    parsed_statements = [_parse_single_statement(statement) for statement in statements]
+
+    if len(parsed_statements) == 1:
+        parsed_statements[0]["scope"] = "single"
+        return parsed_statements[0]
+
+    return _aggregate_statements(parsed_statements)
+
+
+def mock_portfolio_data() -> dict[str, Any]:
+    """Return fallback portfolio data for testing and failure scenarios."""
+    return {
+        "account_id": "MOCK",
+        "scope": "mock",
+        "positions": [
+            {
+                "symbol": "TSLA",
+                "description": "TESLA INC",
+                "quantity": 100,
+                "side": "Long",
+                "asset_category": "STK",
+                "avg_cost": 220.0,
+                "current_price": 185.0,
+                "pnl_pct": -15.91,
+                "market_value": 18500.0,
+                "market_value_base": 18500.0,
+            },
+            {
+                "symbol": "NVDA",
+                "description": "NVIDIA CORP",
+                "quantity": 20,
+                "side": "Long",
+                "asset_category": "STK",
+                "avg_cost": 780.0,
+                "current_price": 836.0,
+                "pnl_pct": 7.18,
+                "market_value": 16720.0,
+                "market_value_base": 16720.0,
+            },
+        ],
+        "cash": 5000.0,
+        "total_value": 40220.0,
+        "daily_pnl": -340.0,
+        "cash_pct": 12.43,
+        "report_date": datetime.now(IBKR_REPORTING_TZ).date().isoformat(),
+    }
+
+
 def _build_account_summary(statement: ET.Element) -> dict[str, Any]:
     report_dates: list[str] = []
     for node in statement.findall(".//*[@reportDate]"):
@@ -126,6 +183,168 @@ def _build_account_summary(statement: ET.Element) -> dict[str, Any]:
         "account_alias": statement.attrib.get("acctAlias", ""),
         "from_date": _normalize_date_text(statement.attrib.get("fromDate")),
         "to_date": _normalize_date_text(statement.attrib.get("toDate")),
+        "report_date": max(report_dates) if report_dates else "",
+    }
+
+
+def _parse_single_statement(statement: ET.Element) -> dict[str, Any]:
+    positions: list[dict[str, Any]] = []
+    cash = 0.0
+    daily_pnl = 0.0
+    total_value = 0.0
+    base_currency = "BASE"
+    account_id = statement.attrib.get("accountId", "UNKNOWN")
+    account_alias = statement.attrib.get("acctAlias", "")
+    latest_report_date = None
+
+    for position in statement.findall(".//OpenPosition"):
+        symbol = position.attrib.get("symbol", "").strip() or "UNKNOWN"
+        currency = position.attrib.get("currency", "").strip() or "UNKNOWN"
+        quantity = _to_float(position.attrib.get("position", "0"))
+        avg_cost = _to_float(position.attrib.get("costBasisPrice", "0"))
+        current_price = _to_float(position.attrib.get("markPrice", "0"))
+        market_value = _to_float(position.attrib.get("positionValue", "0"))
+        fx_rate_to_base = _to_float(position.attrib.get("fxRateToBase", "0")) or 1.0
+        market_value_base = market_value * fx_rate_to_base
+        cost_basis_money = _to_float(position.attrib.get("costBasisMoney", "0"))
+        cost_basis_base = cost_basis_money * fx_rate_to_base
+        unrealized_pnl = _to_float(position.attrib.get("fifoPnlUnrealized", "0"))
+        unrealized_pnl_base = unrealized_pnl * fx_rate_to_base
+        side = position.attrib.get("side", "Long").strip() or "Long"
+        asset_category = position.attrib.get("assetCategory", "").strip()
+        description = position.attrib.get("description", "").strip()
+        percent_of_nav = _to_float(position.attrib.get("percentOfNAV", "0"))
+        report_date = _parse_ibkr_date(position.attrib.get("reportDate"))
+        latest_report_date = max(filter(None, [latest_report_date, report_date]), default=latest_report_date)
+
+        pnl_basis = abs(cost_basis_money) or abs(market_value)
+        if pnl_basis:
+            pnl_pct = (unrealized_pnl / pnl_basis) * 100
+        elif avg_cost:
+            price_move_pct = ((current_price - avg_cost) / avg_cost) * 100
+            pnl_pct = -price_move_pct if side.lower() == "short" or quantity < 0 else price_move_pct
+        else:
+            pnl_pct = 0.0
+
+        positions.append(
+            {
+                "symbol": symbol,
+                "description": description,
+                "currency": currency,
+                "quantity": quantity,
+                "side": side,
+                "asset_category": asset_category,
+                "account_id": account_id,
+                "account_alias": position.attrib.get("acctAlias", account_alias).strip(),
+                "avg_cost": round(avg_cost, 2),
+                "current_price": round(current_price, 2),
+                "pnl_pct": round(pnl_pct, 2),
+                "market_value": round(market_value, 2),
+                "market_value_base": round(market_value_base, 2),
+                "cost_basis_money": round(cost_basis_money, 2),
+                "cost_basis_base": round(cost_basis_base, 2),
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "unrealized_pnl_base": round(unrealized_pnl_base, 2),
+                "fx_rate_to_base": round(fx_rate_to_base, 6),
+                "account_nav_pct": round(percent_of_nav, 2),
+                "report_date": report_date.isoformat() if report_date else "",
+            }
+        )
+
+    latest_equity_summary = _latest_equity_summary(statement)
+    if latest_equity_summary is not None:
+        base_currency = latest_equity_summary.attrib.get("currency", "BASE") or "BASE"
+        cash = _to_float(latest_equity_summary.attrib.get("cash", "0"))
+        total_value = _first_nonzero(
+            latest_equity_summary.attrib.get("netLiquidation"),
+            latest_equity_summary.attrib.get("total"),
+        )
+
+    base_cash_report = statement.find(".//CashReportCurrency[@currency='BASE_SUMMARY']")
+    if base_cash_report is not None:
+        cash = _first_nonzero(
+            base_cash_report.attrib.get("endingCash"),
+            base_cash_report.attrib.get("totalCashValue"),
+            base_cash_report.attrib.get("settledCash"),
+        )
+
+    total_line = statement.find(".//MTMPerformanceSummaryUnderlying[@description='Total P/L']")
+    if total_line is not None:
+        daily_pnl = _first_nonzero(
+            total_line.attrib.get("total"),
+            total_line.attrib.get("totalWithAccruals"),
+        )
+    else:
+        for mtm_summary in statement.findall(".//MTMPerformanceSummaryUnderlying"):
+            if mtm_summary.attrib.get("description") == "Total P/L":
+                continue
+            daily_pnl += _first_nonzero(
+                mtm_summary.attrib.get("mtmPnl"),
+                mtm_summary.attrib.get("markToMarketPL"),
+                mtm_summary.attrib.get("total"),
+            )
+
+    if cash == 0.0 or total_value == 0.0:
+        for equity_summary in statement.findall(".//EquitySummaryByReportDateInBase"):
+            cash = max(cash, _to_float(equity_summary.attrib.get("cash", "0")))
+            total_value = max(
+                total_value,
+                _first_nonzero(
+                    equity_summary.attrib.get("netLiquidation"),
+                    equity_summary.attrib.get("endingSettledCash"),
+                ),
+            )
+
+    cash_pct = (cash / total_value * 100) if total_value else 0.0
+
+    return {
+        "account_id": account_id,
+        "account_alias": account_alias,
+        "positions": positions,
+        "base_currency": base_currency,
+        "cash": round(cash, 2),
+        "total_value": round(total_value, 2),
+        "daily_pnl": round(daily_pnl, 2),
+        "cash_pct": round(cash_pct, 2),
+        "report_date": latest_report_date.isoformat() if latest_report_date else "",
+    }
+
+
+def _aggregate_statements(statements: list[dict[str, Any]]) -> dict[str, Any]:
+    base_currency = statements[0].get("base_currency", "BASE") if statements else "BASE"
+    positions: list[dict[str, Any]] = []
+    cash = 0.0
+    total_value = 0.0
+    daily_pnl = 0.0
+    account_ids: list[str] = []
+    account_aliases: list[str] = []
+    report_dates: list[str] = []
+
+    for statement in statements:
+        positions.extend(statement.get("positions", []))
+        cash += float(statement.get("cash", 0.0))
+        total_value += float(statement.get("total_value", 0.0))
+        daily_pnl += float(statement.get("daily_pnl", 0.0))
+        account_ids.append(str(statement.get("account_id", "UNKNOWN")))
+        alias = str(statement.get("account_alias", "")).strip()
+        if alias:
+            account_aliases.append(alias)
+        report_date = str(statement.get("report_date", "")).strip()
+        if report_date:
+            report_dates.append(report_date)
+
+    cash_pct = (cash / total_value * 100) if total_value else 0.0
+
+    return {
+        "account_id": ",".join(account_ids),
+        "account_alias": ",".join(account_aliases),
+        "scope": "aggregate",
+        "positions": positions,
+        "base_currency": base_currency,
+        "cash": round(cash, 2),
+        "total_value": round(total_value, 2),
+        "daily_pnl": round(daily_pnl, 2),
+        "cash_pct": round(cash_pct, 2),
         "report_date": max(report_dates) if report_dates else "",
     }
 
@@ -419,6 +638,63 @@ def _normalize_portfolio(positions: dict[str, Any]) -> dict[str, Any]:
         "cash_pct": cash_pct,
         "positions": normalized_positions,
     }
+
+
+def _empty_portfolio() -> dict[str, Any]:
+    return {
+        "account_id": "UNKNOWN",
+        "scope": "empty",
+        "positions": [],
+        "base_currency": "BASE",
+        "cash": 0.0,
+        "total_value": 0.0,
+        "daily_pnl": 0.0,
+        "cash_pct": 0.0,
+        "report_date": "",
+    }
+
+
+def _find_flex_statements(root: ET.Element) -> list[ET.Element]:
+    """Handle both wrapped and direct FlexStatement XML payloads."""
+    if root.tag == "FlexStatement":
+        return [root]
+    return root.findall(".//FlexStatement")
+
+
+def _to_float(value: str | None) -> float:
+    if value in (None, ""):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _first_nonzero(*values: str | None) -> float:
+    for value in values:
+        parsed = _to_float(value)
+        if parsed != 0.0:
+            return parsed
+    return 0.0
+
+
+def _latest_equity_summary(root: ET.Element) -> ET.Element | None:
+    summaries = root.findall(".//EquitySummaryByReportDateInBase")
+    if not summaries:
+        return None
+    return max(summaries, key=lambda item: item.attrib.get("reportDate", ""))
+
+
+def _parse_ibkr_date(raw_value: str | None):
+    if not raw_value:
+        return None
+    value = raw_value.strip()
+    for fmt in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def _build_fx_lookup(fx_rates: list[dict[str, Any]]) -> dict[tuple[str, str, str], float]:

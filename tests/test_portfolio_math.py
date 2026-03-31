@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import unittest
 
+from src.core.analysis.portfolio_context import parse_portfolio_xml
 from src.core.analysis.position_analysis import build_research_plan, normalize_portfolio
-from src.core.providers.ibkr_client import _parse_portfolio_xml
-from src.core.providers.news_client import _join_lines
+from src.core.providers.ai_client import _join_lines
 
 
 SAMPLE_XML = """
@@ -57,7 +57,7 @@ SAMPLE_XML = """
 
 class PortfolioMathTests(unittest.TestCase):
     def test_cross_currency_weight_uses_base_value(self) -> None:
-        parsed = _parse_portfolio_xml(SAMPLE_XML)
+        parsed = parse_portfolio_xml(SAMPLE_XML)
         normalized = normalize_portfolio(parsed)
 
         aapl = next(position for position in normalized["positions"] if position["symbol"] == "AAPL")
@@ -66,7 +66,7 @@ class PortfolioMathTests(unittest.TestCase):
         self.assertAlmostEqual(aapl["net_weight_pct"], 39.01, places=2)
 
     def test_short_position_uses_unrealized_pnl_direction(self) -> None:
-        parsed = _parse_portfolio_xml(SAMPLE_XML)
+        parsed = parse_portfolio_xml(SAMPLE_XML)
         normalized = normalize_portfolio(parsed)
 
         short_put = next(
