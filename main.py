@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,11 +15,15 @@ from typing import Any
 from dotenv import load_dotenv
 
 from src.claude_analysis import analyze_portfolio, generate_analysis
-from src.grok_news import get_market_news
-from src.ibkr_data import get_ibkr_positions
 from src.notify import send_telegram, send_telegram_document
-from src.perplexity_macro import get_market_bundle
 from src.reporting import write_daily_report
+from src.pipeline.daily_report import (
+    run_ibkr_fetch_step,
+    run_market_context_step,
+    run_mock_portfolio_context_step,
+    run_portfolio_context_step,
+    run_portfolio_positions_step,
+)
 
 NEWS_MARKET_FALLBACK = (
     "市场主线暂时不完整，但当前可确认的重点仍是："
@@ -71,9 +75,24 @@ def main() -> int:
     print("=== 开始每日投资简报 ===")
     print(f"[Main] Test mode: {args.test}")
     print(f"[Main] News-only mode: {args.news_only}")
+    print(f"[Main] IBKR-only mode: {args.ibkr_only}")
+    print(f"[Main] IBKR-payload mode: {args.ibkr_payload}")
     print(f"[Main] Send mode: {args.send}")
 
     try:
+        if args.ibkr_payload:
+            payload = _fetch_ibkr_analysis_payload(args.test)
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            _print_runtime(start_time, _estimate_ibkr_only_cost())
+            return 0
+
+        if args.ibkr_only:
+            positions = _fetch_portfolio(args.test)
+            portfolio_snapshot = _build_portfolio_snapshot(positions)
+            _emit_output(portfolio_snapshot, args.send, "IBKR portfolio snapshot")
+            _print_runtime(start_time, _estimate_ibkr_only_cost())
+            return 0
+
         if args.news_only:
             market = _fetch_market_context()
             news_flash = _build_news_flash(market)
@@ -109,6 +128,16 @@ def _parse_args() -> argparse.Namespace:
         help="Only fetch and print the daily market news flash from Grok and Perplexity.",
     )
     parser.add_argument(
+        "--ibkr-only",
+        action="store_true",
+        help="Only fetch and print the IBKR portfolio snapshot without market news or AI analysis.",
+    )
+    parser.add_argument(
+        "--ibkr-payload",
+        action="store_true",
+        help="Only fetch IBKR data and print an analysis-ready JSON payload.",
+    )
+    parser.add_argument(
         "--send",
         action="store_true",
         help="Send the generated output to Telegram.",
@@ -122,19 +151,16 @@ def _fetch_market_context(
 ) -> MarketContext:
     """Fetch the combined market bundle and X sentiment in parallel."""
     print("[Main] Step 3/5: Fetching targeted market intelligence...")
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        bundle_future = executor.submit(get_market_bundle, research_plan or {}, positions or {})
-        sentiment_future = executor.submit(get_market_news, research_plan)
-        bundle = bundle_future.result()
-        return MarketContext(
-            brief=_normalize_market_text(bundle.get("brief", ""), NEWS_MARKET_FALLBACK),
-            macro=bundle.get("macro", ""),
-            portfolio_news=_normalize_market_text(
-                bundle.get("portfolio_news", ""),
-                "组合相关资讯暂时不完整，请优先关注核心持仓财报、利率与行业景气变化。",
-            ),
-            sentiment=sentiment_future.result(),
-        )
+    stage_context = run_market_context_step(research_plan=research_plan, positions=positions)
+    return MarketContext(
+        brief=_normalize_market_text(stage_context.brief, NEWS_MARKET_FALLBACK),
+        macro=stage_context.macro,
+        portfolio_news=_normalize_market_text(
+            stage_context.portfolio_news,
+            "组合相关资讯暂时不完整，请优先关注核心持仓财报、利率与行业景气变化。",
+        ),
+        sentiment=stage_context.sentiment,
+    )
 
 
 def _fetch_portfolio(test_mode: bool) -> dict[str, Any]:
@@ -143,7 +169,20 @@ def _fetch_portfolio(test_mode: bool) -> dict[str, Any]:
     if test_mode:
         print("[Main] Using mock positions for test mode.")
         return _normalize_portfolio(_get_test_positions())
-    return _normalize_portfolio(get_ibkr_positions())
+    return _normalize_portfolio(run_portfolio_positions_step())
+
+
+def _fetch_ibkr_analysis_payload(test_mode: bool) -> dict[str, Any]:
+    """Fetch a middleware payload tailored for downstream analysis."""
+    print("[Main] Step 1/1: Fetching IBKR analysis payload...")
+    if test_mode:
+        print("[Main] Using mock portfolio payload for test mode.")
+        return run_mock_portfolio_context_stage()
+
+    xml_text = run_ibkr_fetch_step()
+    if not xml_text:
+        return run_mock_portfolio_context_stage()
+    return run_portfolio_context_step(xml_text)
 
 
 def _build_portfolio_research_plan(positions: dict[str, Any]) -> dict[str, Any]:
@@ -449,6 +488,11 @@ def _estimate_news_cost() -> float:
     grok_estimate = 0.02
     perplexity_estimate = 0.02
     return grok_estimate + perplexity_estimate
+
+
+def _estimate_ibkr_only_cost() -> float:
+    """Return a simple fixed cost estimate for IBKR-only runs."""
+    return 0.0
 
 
 def _clean_for_telegram(text: str) -> str:
